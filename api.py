@@ -21,7 +21,7 @@ app = FastAPI(
 
 # --- SECURITE ---
 # Clé secrète d'accès à l'API (à remplacer en production par une variable d'environnement)
-API_KEY = os.getenv("RNE_API_KEY", "super-secret-key-carel-2026")
+API_KEY = os.getenv("RNE_API_KEY", "super-secret-key-carel-2026").strip()
 API_KEY_NAME = "X-API-Key"
 
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
