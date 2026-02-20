@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: api-rne-elus
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn api:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0 # Facultatif mais garantit un bon environnement Python
+      - key: RNE_API_KEY
+        generateValue: true # Render va générer automatiquement une clé robuste pour toi aléatoirement !

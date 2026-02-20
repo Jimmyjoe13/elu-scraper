@@ -1,0 +1,28 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.env
+
+# === Fichiers de données du projet (À ne surtout pas commiter !) ===
+# Dossier contenant les gros fichiers CSV téléchargés depuis data.gouv.fr
+data_rne/
+
+# Fichier d'état JSON (150+ Mo) contenant toute la France
+rne_state.json
+
+# Fichiers textes et json temporaires liés au scraping RNE
+rne_links.json
+rne_links.txt
+
+# === Scraping HTML (Projet Carel) ===
+*.html
+
+# === OS & IDE ===
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
