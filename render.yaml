@@ -6,6 +6,6 @@ services:
     startCommand: "uvicorn api:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0 # Facultatif mais garantit un bon environnement Python
+        value: 3.11.0
       - key: RNE_API_KEY
-        generateValue: true # Render va générer automatiquement une clé robuste pour toi aléatoirement !
+        value: 241217-eliana-201724-suvannah
