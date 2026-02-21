@@ -57,6 +57,9 @@ class ScrapeRequest(BaseModel):
     url: str = Field(..., description="URL de la mairie à scraper")
     code_insee: str = Field(..., description="Code INSEE de la commune")
 
+class BatchCiblesRequest(BaseModel):
+    insee_codes: List[str] = Field(..., description="Liste des codes INSEE à analyser")
+
 # --- ETAT GLOBAL DE L'API ---
 # Variable globale et verrou pour thread-safety
 sync_status = {
@@ -223,6 +226,48 @@ def get_commune_cibles(insee: str, api_key: str = Depends(get_api_key)):
         "total_cibles": len(cibles),
         "cibles": cibles
     }
+
+@app.post("/api/v1/communes/cibles/batch", tags=["Filtrage Métier"])
+def get_communes_cibles_batch(request: BatchCiblesRequest, api_key: str = Depends(get_api_key)):
+    """
+    Extrait par lot les élus cibles (Maire/Adjoint) pour une liste de codes INSEE.
+    Retourne un objet JSON plat optimisé pour l'ingestion par N8N.
+    """
+    state_data = load_state()
+    if not state_data:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="La base RNE locale n'est pas initialisée."
+        )
+        
+    result_flat = []
+    
+    for insee in request.insee_codes:
+        if insee not in state_data:
+            continue
+            
+        commune_data = state_data[insee]
+        commune_nom = commune_data.get("nom_commune", "")
+        
+        for elu_key, elu_info in commune_data.get("elus", {}).items():
+            postes = elu_info.get("postes", [])
+            
+            # Filtre Métier 80/20
+            cibles_postes = [p for p in postes if "maire" in p.lower() or "adjoint" in p.lower()]
+            
+            if cibles_postes:
+                # Si l'élu a plusieurs postes qualifiants, on les rassemble
+                poste_str = " - ".join(cibles_postes)
+                result_flat.append({
+                    "code_insee": insee,
+                    "nom_commune": commune_nom,
+                    "nom_elu": elu_info.get("nom", ""),
+                    "prenom_elu": elu_info.get("prenom", ""),
+                    "poste": poste_str,
+                    "action_requise": "UPDATE" # Action par défaut demandée
+                })
+                
+    return result_flat
 
 def run_batch_task(codes_insee: List[str]):
     """Tâche de fond pour forcer la mise à jour d'un lot de codes INSEE."""
