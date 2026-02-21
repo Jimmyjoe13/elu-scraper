@@ -26,3 +26,5 @@ rne_links.txt
 .vscode/
 .idea/
 Thumbs.db
+
+__pycache__/

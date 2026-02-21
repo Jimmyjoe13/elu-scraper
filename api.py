@@ -4,13 +4,17 @@ from fastapi.security import APIKeyHeader
 from datetime import datetime
 import threading
 import logging
+import unicodedata
 
 try:
     from sync_rne import main as sync_main
+    from rne_differ import load_state
 except ImportError:
     logging.warning("Le module sync_rne n'a pas pu être importé. Mode développement local possible.")
     def sync_main():
         pass
+    def load_state():
+        return {}
 
 
 app = FastAPI(
@@ -102,6 +106,64 @@ def get_status(api_key: str = Depends(get_api_key)):
         "status": "online",
         "sync_process": current_status,
         "timestamp": datetime.now().isoformat()
+    }
+
+def normalize_string(input_str: str) -> str:
+    """Retire les accents et passe en minuscules pour faciliter la recherche."""
+    return ''.join(c for c in unicodedata.normalize('NFD', input_str) if unicodedata.category(c) != 'Mn').lower().strip()
+
+@app.get("/api/v1/commune/{identifiant}/elus", tags=["Consultation"])
+def get_commune_elus(identifiant: str, api_key: str = Depends(get_api_key)):
+    """
+    Récupère la liste des élus d'une commune spécifique depuis l'état RNE local.
+    L'identifiant peut être un code INSEE ou le nom exact de la ville sans les accents.
+    Nécessite le header X-API-Key.
+    """
+    state_data = load_state()
+    if not state_data:
+         raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="La base de données RNE n'a pas encore été initialisée. Veuillez lancer une synchronisation au préalable."
+        )
+
+    commune_data = None
+    commune_insee = None
+    
+    # 1. Recherche directe par code INSEE
+    if identifiant.isdigit() and len(identifiant) >= 4:
+        if identifiant in state_data:
+            commune_data = state_data[identifiant]
+            commune_insee = identifiant
+    
+    # 2. Recherche par nom exact corrigé si pas trouvé par INSEE
+    if not commune_data:
+        search_term = normalize_string(identifiant)
+        for insee, data in state_data.items():
+            if normalize_string(data.get("nom_commune", "")) == search_term:
+                commune_data = data
+                commune_insee = insee
+                break
+
+    if not commune_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Commune introuvable pour l'identifiant: {identifiant}"
+        )
+
+    # 3. Formatage de la réponse
+    elus_list = []
+    for elu_key, elu_info in commune_data.get("elus", {}).items():
+        elus_list.append({
+            "nom": elu_info.get("nom", ""),
+            "prenom": elu_info.get("prenom", ""),
+            "postes": elu_info.get("postes", [])
+        })
+
+    return {
+        "commune_code_insee": commune_insee,
+        "commune_nom": commune_data.get("nom_commune", ""),
+        "total_elus": len(elus_list),
+        "elus": elus_list
     }
 
 # Lancement serveur dev si exécuté directement
