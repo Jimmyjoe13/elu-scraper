@@ -205,9 +205,10 @@ def get_commune_cibles(insee: str, api_key: str = Depends(get_api_key)):
         
     cibles = []
     
+    mots_cles_cibles = ["maire", "adjoint", "président", "president", "vice-", "délégué", "delegue"]
     for row in rows:
         postes = json.loads(row['postes'])
-        is_cible = any("maire" in p.lower() or "adjoint" in p.lower() for p in postes)
+        is_cible = any(any(kw in p.lower() for kw in mots_cles_cibles) for p in postes)
         if is_cible:
             cibles.append({
                 "nom": row['nom'],
@@ -244,10 +245,11 @@ def get_communes_cibles_batch(request: BatchCiblesRequest, api_key: str = Depend
     c.close()
     conn.close()
     
+    mots_cles_cibles = ["maire", "adjoint", "président", "president", "vice-", "délégué", "delegue"]
     result_flat = []
     for row in all_rows:
         postes = json.loads(row['postes'])
-        cibles_postes = [p for p in postes if "maire" in p.lower() or "adjoint" in p.lower()]
+        cibles_postes = [p for p in postes if any(kw in p.lower() for kw in mots_cles_cibles)]
         
         if cibles_postes:
             poste_str = " - ".join(cibles_postes)
