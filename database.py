@@ -28,6 +28,15 @@ def init_db():
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_code_insee ON elus(code_insee)')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS communes_urls (
+                code_insee TEXT PRIMARY KEY,
+                url_racine TEXT NOT NULL,
+                url_exacte TEXT NOT NULL
+            )
+        ''')
+        
         conn.commit()
         logging.info("Base de données SQLite initialisée avec succès.")
     except Exception as e:

@@ -397,14 +397,45 @@ def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_k
     """
     Importe et exécute le scraper universel (Mistral AI) à la volée sur l'URL cible,
     puis met à jour SQLite (l'état local) pour ce code INSEE avec Upsert.
+    Intègre une auto-découverte (Spidering) et un cache local SQLite.
     """
     import scraper
     
-    url = request.url.strip()
+    url_racine = request.url.strip()
+    code_insee = request.code_insee
     scraped_data = []
     
+    conn = get_db_connection()
+    c = conn.cursor()
+    
     try:
-        scraped_data = scraper.scrape_universal_url(url, request.code_insee)
+        # Étape 1 : Vérifier le cache SQLite
+        c.execute("SELECT url_exacte FROM communes_urls WHERE code_insee = ?", (code_insee,))
+        row = c.fetchone()
+        
+        if row and row["url_exacte"]:
+            exact_url = row["url_exacte"]
+            logging.info(f"URL exacte trouvée dans le cache SQLite pour {code_insee}: {exact_url}")
+        else:
+            # Étape 2 : Pas de cache, on lance le Spidering
+            exact_url = scraper.find_elus_url(url_racine)
+            
+            if not exact_url:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Le Spider n'a trouvé aucune page d'élus sur le domaine racine {url_racine}. À vérifier manuellement."
+                )
+                
+            # Étape 3 : Mise en cache pour les prochaines fois
+            c.execute('''
+                INSERT OR REPLACE INTO communes_urls (code_insee, url_racine, url_exacte)
+                VALUES (?, ?, ?)
+            ''', (code_insee, url_racine, exact_url))
+            conn.commit()
+            logging.info(f"Nouvelle URL exacte {exact_url} mise en cache pour INSEE {code_insee}.")
+            
+        # Étape 4 : Lancement du Scraper Universel
+        scraped_data = scraper.scrape_universal_url(exact_url, code_insee)
             
         if not scraped_data:
             raise HTTPException(
@@ -438,6 +469,8 @@ def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_k
         return {
             "message": "Scraping universel réussi (IA), état local SQLite mis à jour avec réactivité J+1.",
             "code_insee": request.code_insee,
+            "url_racine": url_racine,
+            "url_exacte_utilisee": exact_url,
             "elus_mis_a_jour_ou_crees": len(scraped_data)
         }
     except HTTPException:
@@ -448,6 +481,9 @@ def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_k
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur interne pendant le scraping: {e}"
         )
+    finally:
+        c.close()
+        conn.close()
 
 # Lancement serveur dev si exécuté directement
 if __name__ == "__main__":

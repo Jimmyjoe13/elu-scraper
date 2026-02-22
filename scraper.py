@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 import re
 import json
 import logging
+from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,7 +24,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1"
@@ -129,13 +130,57 @@ def scrape_universal_url(url, code_insee):
         logging.error(f"Échec de l'extraction sur {url}: {e}")
         raise e
 
+def find_elus_url(root_domain: str) -> str:
+    """
+    Auto-découverte experte (Spidering de surface).
+    Récupère la page d'accueil, extrait les liens et retourne l'URL exacte des élus 
+    en cherchant des mots-clés. Profondeur de recherche = 1.
+    """
+    if not root_domain.startswith("http"):
+        root_domain = f"https://{root_domain}"
+        
+    logging.info(f"Spidering en cours sur le domaine racine : {root_domain}")
+    try:
+        response = requests.get(root_domain, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        links = soup.find_all('a', href=True)
+        
+        keywords = ["elu", "conseil-municipal", "equipe-municipale", "vos-elus", "maire"]
+        
+        for link in links:
+            href = link.get('href', '').lower()
+            text = link.get_text(strip=True).lower()
+            
+            # Si un mot-clé correspond dans le href ou dans le texte du lien
+            if any(kw in href for kw in keywords) or any(kw in text.replace('é', 'e') for kw in keywords):
+                exact_url = urljoin(root_domain, link['href'])
+                logging.info(f"URL exacte trouvée via le spider : {exact_url}")
+                return exact_url
+                
+        logging.warning("Le spidering n'a trouvé aucune URL pertinente depuis la racine.")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Erreur HTTP pendant le spidering de {root_domain}: {e}")
+        return None
+
 # --- Exécution standalone de Test ---
 if __name__ == "__main__":
-    test_url = "https://metropole.rennes.fr/le-conseil-municipal" # Ville de Rennes
-    test_insee = "35238"
+    test_root_domain = "https://www.montpellier.fr" # Ville de Montpellier
+    test_insee = "34172"
     
-    try:
-        resultats = scrape_universal_url(test_url, test_insee)
-        print(json.dumps(resultats, indent=2, ensure_ascii=False))
-    except Exception as e:
-        print(f"Test échoué : {e}")
+    print(f"--- Test de Spidering sur {test_root_domain} ---")
+    exact_url = find_elus_url(test_root_domain)
+    
+    if exact_url:
+        print(f"URL exacte trouvée : {exact_url}")
+        print("--- Test de l'Extraction Mistral IA ---")
+        try:
+            resultats = scrape_universal_url(exact_url, test_insee)
+            print(json.dumps(resultats, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"Test d'extraction échoué : {e}")
+    else:
+        print("Le Spider n'a pas trouvé la page. Test d'extraction annulé.")
