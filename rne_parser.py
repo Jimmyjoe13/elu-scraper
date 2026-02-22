@@ -1,27 +1,28 @@
 import os
 import csv
-import json
 import logging
+from database import upsert_elus_batch, init_db
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def process_file(filepath, default_poste, state):
+def process_file_stream(filepath, default_poste):
     """
-    Lit un fichier CSV du RNE et met à jour l'état.
+    Lit un fichier CSV du RNE en streaming et insère par lots dans SQLite.
     """
     if not os.path.exists(filepath):
         logging.warning(f"Fichier introuvable: {filepath}")
         return
 
-    logging.info(f"Analyse de {filepath}...")
+    logging.info(f"Analyse en streaming de {filepath}...")
+    batch_size = 2000
+    current_batch = {}
+
     with open(filepath, mode='r', encoding='utf-8') as f:
-        # Les fichiers utilisent le point-virgule
         reader = csv.DictReader(f, delimiter=';')
         
         # Pour une compatibilité robuste, on nettoie les espaces autour des noms de colonnes
         header = {k.strip(): k for k in reader.fieldnames}
         
-        # Mapping des colonnes (elles peuvent légèrement varier)
         col_insee = header.get("Code de la commune") or header.get("Code de la commune ou de l'arrondissement")
         col_nom_commune = header.get("Libellé de la commune") or header.get("Libellé de la commune ou de l'arrondissement")
         col_nom = header.get("Nom de l'élu")
@@ -40,7 +41,6 @@ def process_file(filepath, default_poste, state):
             prenom = row.get(col_prenom, "").strip()
             dob = row.get(col_dob, "").strip()
             
-            # Gestion de la fonction / poste
             poste = row.get(col_fonction, "").strip() if col_fonction else ""
             if not poste:
                 poste = default_poste
@@ -48,70 +48,57 @@ def process_file(filepath, default_poste, state):
             if not insee or not nom:
                 continue
 
-            # Création de la clé unique
+            # Création de la clé primaire robuste
             elu_key = f"{nom}|{prenom}|{dob}"
-
-            if insee not in state:
-                state[insee] = {
+            
+            if elu_key not in current_batch:
+                current_batch[elu_key] = {
+                    "code_insee": insee,
                     "nom_commune": nom_commune,
-                    "elus": {}
-                }
-
-            if elu_key not in state[insee]["elus"]:
-                state[insee]["elus"][elu_key] = {
                     "nom": nom,
                     "prenom": prenom,
                     "postes": []
                 }
+                
+            if poste and poste not in current_batch[elu_key]["postes"]:
+                current_batch[elu_key]["postes"].append(poste)
+                
+            if len(current_batch) >= batch_size:
+                upsert_elus_batch(current_batch)
+                current_batch.clear()
 
-            if poste not in state[insee]["elus"][elu_key]["postes"]:
-                state[insee]["elus"][elu_key]["postes"].append(poste)
+        # Insérer les reliquats
+        if current_batch:
+            upsert_elus_batch(current_batch)
+            current_batch.clear()
+            
+    logging.info(f"Terminé pour {filepath}.")
 
 def parse_all_rne_datasets(data_dir="data_rne"):
     """
-    Parse les fichiers RNE locaux et retourne un dictionnaire agrégé.
+    Parse les fichiers RNE locaux et les pousse vers SQLite, sans saturation RAM.
     """
-    state = {}
+    init_db()
     
     # 1. Conseillers Municipaux
-    # On ajoute un default poste si par hasard la colonne fonction est vide
-    process_file(
+    process_file_stream(
         os.path.join(data_dir, "elus-conseillers-municipaux-cm.csv"),
-        default_poste="Conseiller municipal",
-        state=state
+        default_poste="Conseiller municipal"
     )
 
-    # 2. Maires (souvent sans colonne "fonction", donc on force "Maire")
-    process_file(
+    # 2. Maires (souvent sans colonne "fonction", on force "Maire")
+    process_file_stream(
         os.path.join(data_dir, "elus-maires-mai.csv"),
-        default_poste="Maire",
-        state=state
+        default_poste="Maire"
     )
 
     # 3. Arrondissements
-    process_file(
+    process_file_stream(
         os.path.join(data_dir, "elus-conseillers-darrondissements-ca.csv"),
-        default_poste="Conseiller d'arrondissement",
-        state=state
+        default_poste="Conseiller d'arrondissement"
     )
-    
-    # 4. Communautaires (EPCI) - Optionnel si l'on veut un scope agglomération
-    # process_file(
-    #     os.path.join(data_dir, "elus-conseillers-communautaires-epci.csv"),
-    #     default_poste="Conseiller communautaire",
-    #     state=state
-    # )
 
-    logging.info(f"Parsing terminé. Communes trouvées : {len(state)}")
-    return state
+    logging.info("Toutes les insertions SQL RNE sont terminées.")
 
 if __name__ == "__main__":
-    state = parse_all_rne_datasets()
-    # Test avec la commune de Gignac (Insee potentiellement 13043 pour Gignac-la-Nerthe)
-    gignac_insee = "13043"
-    if gignac_insee in state:
-        print(f"Elus de {state[gignac_insee]['nom_commune']}:")
-        for elu in state[gignac_insee]["elus"].values():
-            print(f"- {elu['prenom']} {elu['nom']} : {', '.join(elu['postes'])}")
-    else:
-        print("Commune 13043 non trouvée.")
+    parse_all_rne_datasets()

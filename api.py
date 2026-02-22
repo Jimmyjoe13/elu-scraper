@@ -7,17 +7,19 @@ from datetime import datetime
 import threading
 import logging
 import unicodedata
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     from sync_rne import main as sync_main
-    from rne_differ import load_state, save_state
 except ImportError:
     logging.warning("Le module sync_rne n'a pas pu être importé. Mode développement local possible.")
     def sync_main():
         pass
-    def load_state():
-        return {}
-    def save_state(state): pass
+
+from database import init_db, get_db_connection, upsert_elus_batch
+import json
 
 
 app = FastAPI(
@@ -25,6 +27,10 @@ app = FastAPI(
     description="API pour déclencher et surveiller l'extraction des données du Répertoire National des Élus.",
     version="1.0.0"
 )
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
 
 # --- SECURITE ---
 # Clé secrète d'accès à l'API (à remplacer en production par une variable d'environnement)
@@ -137,53 +143,46 @@ def normalize_string(input_str: str) -> str:
 @app.get("/api/v1/commune/{identifiant}/elus", tags=["Consultation"])
 def get_commune_elus(identifiant: str, api_key: str = Depends(get_api_key)):
     """
-    Récupère la liste des élus d'une commune spécifique depuis l'état RNE local.
+    Récupère la liste des élus d'une commune spécifique depuis SQLite.
     L'identifiant peut être un code INSEE ou le nom exact de la ville sans les accents.
-    Nécessite le header X-API-Key.
     """
-    state_data = load_state()
-    if not state_data:
-         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="La base de données RNE n'a pas encore été initialisée. Veuillez lancer une synchronisation au préalable."
-        )
-
-    commune_data = None
-    commune_insee = None
+    conn = get_db_connection()
+    c = conn.cursor()
     
-    # 1. Recherche directe par code INSEE
     if identifiant.isdigit() and len(identifiant) >= 4:
-        if identifiant in state_data:
-            commune_data = state_data[identifiant]
-            commune_insee = identifiant
-    
-    # 2. Recherche par nom exact corrigé si pas trouvé par INSEE
-    if not commune_data:
+        c.execute("SELECT code_insee, nom_commune, nom, prenom, postes FROM elus WHERE code_insee = ?", (identifiant,))
+        rows = c.fetchall()
+    else:
+        # Recherche par nom exact corrigé
         search_term = normalize_string(identifiant)
-        for insee, data in state_data.items():
-            if normalize_string(data.get("nom_commune", "")) == search_term:
-                commune_data = data
-                commune_insee = insee
-                break
+        c.execute("SELECT code_insee, nom_commune, nom, prenom, postes FROM elus")
+        all_rows = c.fetchall()
+        
+        filtered_rows = []
+        for row in all_rows:
+            if normalize_string(row['nom_commune']) == search_term:
+                filtered_rows.append(row)
+        rows = filtered_rows
 
-    if not commune_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Commune introuvable pour l'identifiant: {identifiant}"
-        )
+    c.close()
+    conn.close()
 
-    # 3. Formatage de la réponse
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Commune introuvable: {identifiant}")
+
+    commune_nom = rows[0]['nom_commune']
+    commune_insee = rows[0]['code_insee']
     elus_list = []
-    for elu_key, elu_info in commune_data.get("elus", {}).items():
+    for row in rows:
         elus_list.append({
-            "nom": elu_info.get("nom", ""),
-            "prenom": elu_info.get("prenom", ""),
-            "postes": elu_info.get("postes", [])
+            "nom": row['nom'],
+            "prenom": row['prenom'],
+            "postes": json.loads(row['postes'])
         })
 
     return {
         "commune_code_insee": commune_insee,
-        "commune_nom": commune_data.get("nom_commune", ""),
+        "commune_nom": commune_nom,
         "total_elus": len(elus_list),
         "elus": elus_list
     }
@@ -192,37 +191,32 @@ def get_commune_elus(identifiant: str, api_key: str = Depends(get_api_key)):
 def get_commune_cibles(insee: str, api_key: str = Depends(get_api_key)):
     """
     Filtre: Ne retourne OBLIGATOIREMENT que les élus dont le poste contient 'Maire' ou 'Adjoint'.
-    Rôle: Réduire la taille du payload pour N8N.
     """
-    state_data = load_state()
-    if not state_data:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="La base RNE locale n'est pas initialisée."
-        )
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT code_insee, nom_commune, nom, prenom, postes FROM elus WHERE code_insee = ?", (insee,))
+    rows = c.fetchall()
+    c.close()
+    conn.close()
+    
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Code INSEE {insee} introuvable.")
         
-    if insee not in state_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Code INSEE {insee} introuvable."
-        )
-        
-    commune_data = state_data[insee]
     cibles = []
     
-    for elu_key, elu_info in commune_data.get("elus", {}).items():
-        postes = elu_info.get("postes", [])
+    for row in rows:
+        postes = json.loads(row['postes'])
         is_cible = any("maire" in p.lower() or "adjoint" in p.lower() for p in postes)
         if is_cible:
             cibles.append({
-                "nom": elu_info.get("nom", ""),
-                "prenom": elu_info.get("prenom", ""),
+                "nom": row['nom'],
+                "prenom": row['prenom'],
                 "postes": postes
             })
             
     return {
         "commune_code_insee": insee,
-        "commune_nom": commune_data.get("nom_commune", ""),
+        "commune_nom": rows[0]['nom_commune'],
         "total_cibles": len(cibles),
         "cibles": cibles
     }
@@ -231,46 +225,44 @@ def get_commune_cibles(insee: str, api_key: str = Depends(get_api_key)):
 def get_communes_cibles_batch(request: BatchCiblesRequest, api_key: str = Depends(get_api_key)):
     """
     Extrait par lot les élus cibles (Maire/Adjoint) pour une liste de codes INSEE.
-    Retourne un objet JSON plat optimisé pour l'ingestion par N8N.
     """
-    state_data = load_state()
-    if not state_data:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="La base RNE locale n'est pas initialisée."
-        )
+    if not request.insee_codes:
+        return []
         
-    result_flat = []
+    conn = get_db_connection()
+    c = conn.cursor()
     
-    for insee in request.insee_codes:
-        if insee not in state_data:
-            continue
-            
-        commune_data = state_data[insee]
-        commune_nom = commune_data.get("nom_commune", "")
+    all_rows = []
+    # Requêtes SQL en chunk de 900 max par précaution
+    for i in range(0, len(request.insee_codes), 900):
+        chunk = request.insee_codes[i:i + 900]
+        placeholders = ','.join(['?'] * len(chunk))
+        c.execute(f"SELECT code_insee, nom_commune, nom, prenom, postes FROM elus WHERE code_insee IN ({placeholders})", chunk)
+        all_rows.extend(c.fetchall())
         
-        for elu_key, elu_info in commune_data.get("elus", {}).items():
-            postes = elu_info.get("postes", [])
+    c.close()
+    conn.close()
+    
+    result_flat = []
+    for row in all_rows:
+        postes = json.loads(row['postes'])
+        cibles_postes = [p for p in postes if "maire" in p.lower() or "adjoint" in p.lower()]
+        
+        if cibles_postes:
+            poste_str = " - ".join(cibles_postes)
+            result_flat.append({
+                "code_insee": row['code_insee'],
+                "nom_commune": row['nom_commune'],
+                "nom_elu": row['nom'],
+                "prenom_elu": row['prenom'],
+                "poste": poste_str,
+                "action_requise": "UPDATE"
+            })
             
-            # Filtre Métier 80/20
-            cibles_postes = [p for p in postes if "maire" in p.lower() or "adjoint" in p.lower()]
-            
-            if cibles_postes:
-                # Si l'élu a plusieurs postes qualifiants, on les rassemble
-                poste_str = " - ".join(cibles_postes)
-                result_flat.append({
-                    "code_insee": insee,
-                    "nom_commune": commune_nom,
-                    "nom_elu": elu_info.get("nom", ""),
-                    "prenom_elu": elu_info.get("prenom", ""),
-                    "poste": poste_str,
-                    "action_requise": "UPDATE" # Action par défaut demandée
-                })
-                
     return result_flat
 
 def run_batch_task(codes_insee: List[str]):
-    """Tâche de fond pour forcer la mise à jour d'un lot de codes INSEE."""
+    """Tâche de fond pour forcer la mise à jour (via main RNE) si N8N envoie le code."""
     with status_lock:
         if sync_status["is_running"]:
             return
@@ -296,8 +288,7 @@ def run_batch_task(codes_insee: List[str]):
 @app.post("/api/v1/sync/batch", status_code=status.HTTP_202_ACCEPTED, tags=["Synchronisation"])
 def trigger_batch_sync(request: BatchSyncRequest, background_tasks: BackgroundTasks, api_key: str = Depends(get_api_key)):
     """
-    Déclenche une tâche de fond (BackgroundTasks) qui va forcer la mise à jour RNE pour ces communes.
-    Permet de lisser la charge avec des envois par lots depuis N8N.
+    Déclenche une tâche de fond (BackgroundTasks) qui va forcer la mise à jour RNE (via ingestion locale par lot).
     """
     with status_lock:
         if sync_status["is_running"]:
@@ -315,41 +306,63 @@ def trigger_batch_sync(request: BatchSyncRequest, background_tasks: BackgroundTa
 @app.post("/api/v1/compare/salesforce", tags=["Comparaison"])
 def compare_salesforce(elus_sf: List[SalesforceElu], api_key: str = Depends(get_api_key)):
     """
-    Compare un lot d'élus Salesforce avec l'état local load_state().
+    Compare un lot d'élus Salesforce avec l'état DB locale (SQLite).
     Retourne exclusivement les objets nécessitant une mise à jour ou une création.
     """
-    state_data = load_state()
-    if not state_data:
-         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="La base RNE locale n'est pas chargée."
-        )
+    if not elus_sf: return {"upserts": []}
 
-    upserts = []
-    # Group input by code_insee for CREATE detection
     sf_by_insee = {}
+    insee_codes_to_fetch = set()
     for sf_elu in elus_sf:
         if sf_elu.code_insee not in sf_by_insee:
             sf_by_insee[sf_elu.code_insee] = []
         sf_by_insee[sf_elu.code_insee].append(sf_elu)
+        insee_codes_to_fetch.add(sf_elu.code_insee)
 
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    all_rows = []
+    insee_list = list(insee_codes_to_fetch)
+    for i in range(0, len(insee_list), 900):
+        chunk = insee_list[i:i + 900]
+        placeholders = ','.join(['?'] * len(chunk))
+        c.execute(f"SELECT code_insee, nom_commune, nom, prenom, postes FROM elus WHERE code_insee IN ({placeholders})", chunk)
+        all_rows.extend(c.fetchall())
+        
+    c.close()
+    conn.close()
+    
+    local_elus_by_insee = {}
+    for row in all_rows:
+        insee = row['code_insee']
+        if insee not in local_elus_by_insee:
+            local_elus_by_insee[insee] = []
+        
+        local_elus_by_insee[insee].append({
+            "nom": row['nom'],
+            "prenom": row['prenom'],
+            "postes": json.loads(row['postes'])
+        })
+
+    upserts = []
+    
     for insee, sf_list in sf_by_insee.items():
-        if insee not in state_data:
+        commune_elus = local_elus_by_insee.get(insee, [])
+        if not commune_elus:
             continue
             
-        commune_elus = state_data[insee].get("elus", {})
-        
         # 1. Vérifier UPDATE
         for sf_elu in sf_list:
             local_elu = None
-            for key, elu_info in commune_elus.items():
-                if elu_info.get("nom", "").upper() == sf_elu.nom.upper() and \
-                   normalize_string(elu_info.get("prenom", "")) == normalize_string(sf_elu.prenom):
+            for elu_info in commune_elus:
+                if elu_info["nom"].upper() == sf_elu.nom.upper() and \
+                   normalize_string(elu_info["prenom"]) == normalize_string(sf_elu.prenom):
                     local_elu = elu_info
                     break
                     
             if local_elu:
-                postes_locaux = " - ".join(local_elu.get("postes", []))
+                postes_locaux = " - ".join(local_elu["postes"])
                 if not sf_elu.fonction_actuelle or normalize_string(sf_elu.fonction_actuelle) != normalize_string(postes_locaux):
                     upserts.append({
                         "id_salesforce": sf_elu.id_salesforce,
@@ -362,18 +375,18 @@ def compare_salesforce(elus_sf: List[SalesforceElu], api_key: str = Depends(get_
                     
         # 2. Vérifier CREATE (élus locaux absents de Salesforce)
         sf_keys = [f"{e.nom.upper()}|{normalize_string(e.prenom)}" for e in sf_list]
-        for key, elu_info in commune_elus.items():
-            nom_local = elu_info.get("nom", "").upper()
-            prenom_local = normalize_string(elu_info.get("prenom", ""))
+        for elu_info in commune_elus:
+            nom_local = elu_info["nom"].upper()
+            prenom_local = normalize_string(elu_info["prenom"])
             local_key = f"{nom_local}|{prenom_local}"
             
             if local_key not in sf_keys:
                 upserts.append({
                     "id_salesforce": None,
                     "code_insee": insee,
-                    "nom": elu_info.get("nom", ""),
-                    "prenom": elu_info.get("prenom", ""),
-                    "nouvelle_fonction": " - ".join(elu_info.get("postes", [])),
+                    "nom": elu_info["nom"],
+                    "prenom": elu_info["prenom"],
+                    "nouvelle_fonction": " - ".join(elu_info["postes"]),
                     "action": "CREATE"
                 })
 
@@ -382,68 +395,49 @@ def compare_salesforce(elus_sf: List[SalesforceElu], api_key: str = Depends(get_
 @app.post("/api/v1/scrape/url", tags=["Scraping"])
 def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_key)):
     """
-    Importe et exécute les fonctions de scraper.py à la volée sur l'URL cible,
-    puis met à jour l'état local pour ce code INSEE précis.
+    Importe et exécute le scraper universel (Mistral AI) à la volée sur l'URL cible,
+    puis met à jour SQLite (l'état local) pour ce code INSEE avec Upsert.
     """
     import scraper
     
-    url = request.url.lower()
+    url = request.url.strip()
     scraped_data = []
     
     try:
-        if "gignac" in url:
-            scraped_data = scraper.scrape_gignac()
-        elif "toulouse" in url:
-            scraped_data = scraper.scrape_toulouse()
-        elif "lyon" in url:
-            lyon_data = scraper.scrape_lyon()
-            for arr_name, elus in lyon_data.items():
-                scraped_data.extend(elus)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="URL non supportée par les scripts de scraping."
-            )
+        scraped_data = scraper.scrape_universal_url(url, request.code_insee)
             
         if not scraped_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Aucune donnée trouvée via l'URL spécifiée."
+                detail="Aucune donnée d'élu trouvée ou l'IA n'a pas pu l'extraire depuis l'URL spécifiée."
             )
             
-        # Mise à jour avec Lock
-        with status_lock:
-            state_data = load_state()
-            insee = request.code_insee
+        batch_elus = {}
+        for elu in scraped_data:
+            nom = elu.get("nom", "").upper()
+            prenom = elu.get("prenom", "")
+            poste = elu.get("poste", "")
             
-            if insee not in state_data:
-                state_data[insee] = {"nom_commune": "Commune Scrapée dynamiquement", "elus": {}}
+            # Utiliser la mention Scraped pour éviter un écrasement accidentel avec DoB si on ré-ingère le RNE brut
+            id_elu = f"{nom}|{prenom}|Scraped"
+            
+            if id_elu not in batch_elus:
+                batch_elus[id_elu] = {
+                    "code_insee": request.code_insee,
+                    "nom_commune": "Commune Scrapée", 
+                    "nom": nom,
+                    "prenom": prenom,
+                    "postes": []
+                }
+            if poste and poste not in batch_elus[id_elu]["postes"]:
+                batch_elus[id_elu]["postes"].append(poste)
                 
-            for elu in scraped_data:
-                nom = elu.get("nom", "").upper()
-                prenom = elu.get("prenom", "")
-                poste = elu.get("poste", "")
-                
-                matched_key = None
-                for k, v in state_data[insee]["elus"].items():
-                    if v.get("nom", "").upper() == nom and normalize_string(v.get("prenom", "")) == normalize_string(prenom):
-                        matched_key = k
-                        break
-                        
-                if not matched_key:
-                    new_key = f"{nom}|{prenom}|Scraped"
-                    state_data[insee]["elus"][new_key] = {
-                        "nom": nom, "prenom": prenom, "postes": [poste] if poste else []
-                    }
-                else:
-                    if poste and poste not in state_data[insee]["elus"][matched_key]["postes"]:
-                        state_data[insee]["elus"][matched_key]["postes"].append(poste)
-                        
-            save_state(state_data)
+        # Insertion directe en base SQL avec protection merge :
+        upsert_elus_batch(batch_elus)
             
         return {
-            "message": "Scraping réussi, état local mis à jour avec réactivité J+1.",
-            "code_insee": insee,
+            "message": "Scraping universel réussi (IA), état local SQLite mis à jour avec réactivité J+1.",
+            "code_insee": request.code_insee,
             "elus_mis_a_jour_ou_crees": len(scraped_data)
         }
     except HTTPException:
