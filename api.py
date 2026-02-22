@@ -62,6 +62,7 @@ class BatchSyncRequest(BaseModel):
 class ScrapeRequest(BaseModel):
     url: str = Field(..., description="URL de la mairie à scraper")
     code_insee: str = Field(..., description="Code INSEE de la commune")
+    nom_commune: str = Field(default="Inconnue", description="Nom de la commune")
 
 class BatchCiblesRequest(BaseModel):
     insee_codes: List[str] = Field(..., description="Liste des codes INSEE à analyser")
@@ -458,7 +459,7 @@ def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_k
             if id_elu not in batch_elus:
                 batch_elus[id_elu] = {
                     "code_insee": request.code_insee,
-                    "nom_commune": "Commune Scrapée", 
+                    "nom_commune": request.nom_commune, 
                     "nom": nom,
                     "prenom": prenom,
                     "postes": []
