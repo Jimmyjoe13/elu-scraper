@@ -8,11 +8,12 @@ d'une URL puis en demandant à Mistral AI d'en formater la sortie au format JSON
 import os
 import requests
 from bs4 import BeautifulSoup
-import re
 import json
 import logging
 from urllib.parse import urljoin, urlparse
 import urllib3
+import re
+from curl_cffi import requests as curequests
 from dotenv import load_dotenv
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -23,15 +24,6 @@ load_dotenv()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 # Le fallback webhook restera pour un envoi debug ou d'autres usages.
 WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1"
-}
 
 def clean_html_to_text(html_content):
     """Extrait efficacement le texte brut pertinent d'une page."""
@@ -115,7 +107,7 @@ def scrape_universal_url(url, code_insee):
     """
     logging.info(f"Début du scraping universel pour l'URL: {url} (INSEE: {code_insee})")
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20, verify=False)
+        response = curequests.get(url, impersonate="chrome110", timeout=20)
         response.raise_for_status()
         
         # 1. Obtenir un texte propre
@@ -145,7 +137,7 @@ def find_elus_url(root_domain: str) -> str:
     
     # --- ÉTAPE 1 : Homepage Crawl (Le plus fiable) ---
     try:
-        response = requests.get(root_domain, headers=HEADERS, timeout=15, verify=False)
+        response = curequests.get(root_domain, impersonate="chrome110", timeout=15)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -179,7 +171,7 @@ def find_elus_url(root_domain: str) -> str:
         test_url = urljoin(root_domain, path)
         try:
             # On utilise GET pour avoir le corps et faire l'anti-soft 404
-            get_response = requests.get(test_url, headers=HEADERS, timeout=10, allow_redirects=True, verify=False)
+            get_response = curequests.get(test_url, impersonate="chrome110", timeout=10, allow_redirects=True)
             if get_response.status_code == 200:
                 text_lower = get_response.text.lower()
                 if any(kw in text_lower for kw in keywords_soft404):
@@ -196,7 +188,7 @@ def find_elus_url(root_domain: str) -> str:
         sitemap_url = urljoin(root_domain, sitemap_path)
         try:
             # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
-            with requests.get(sitemap_url, headers=HEADERS, timeout=10, stream=True, verify=False) as response:
+            with curequests.get(sitemap_url, impersonate="chrome110", timeout=10, stream=True) as response:
                 if response.status_code == 200:
                     logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
                     
