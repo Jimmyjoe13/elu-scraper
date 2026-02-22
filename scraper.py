@@ -112,7 +112,7 @@ def scrape_universal_url(url, code_insee):
     """
     logging.info(f"Début du scraping universel pour l'URL: {url} (INSEE: {code_insee})")
     try:
-        response = curequests.get(url, impersonate="chrome110", timeout=30)
+        response = curequests.get(url, impersonate="chrome110", timeout=30, verify=False)
         response.raise_for_status()
         
         # 1. Obtenir un texte propre
@@ -142,7 +142,7 @@ def find_elus_url(root_domain: str) -> str:
     
     # --- ÉTAPE 1 : Homepage Crawl (Le plus fiable) ---
     try:
-        response = curequests.get(root_domain, impersonate="chrome110", timeout=30)
+        response = curequests.get(root_domain, impersonate="chrome110", timeout=30, verify=False)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -178,7 +178,7 @@ def find_elus_url(root_domain: str) -> str:
         test_url = urljoin(root_domain, path)
         try:
             # On utilise GET pour avoir le corps et faire l'anti-soft 404
-            get_response = curequests.get(test_url, impersonate="chrome110", timeout=30, allow_redirects=True)
+            get_response = curequests.get(test_url, impersonate="chrome110", timeout=30, allow_redirects=True, verify=False)
             if get_response.status_code == 200:
                 text_lower = get_response.text.lower()
                 if any(kw in text_lower for kw in keywords_soft404):
@@ -195,7 +195,7 @@ def find_elus_url(root_domain: str) -> str:
         sitemap_url = urljoin(root_domain, sitemap_path)
         try:
             # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
-            with curequests.get(sitemap_url, impersonate="chrome110", timeout=30, stream=True) as response:
+            with curequests.get(sitemap_url, impersonate="chrome110", timeout=30, stream=True, verify=False) as response:
                 if response.status_code == 200:
                     logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
                     
