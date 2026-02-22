@@ -1,11 +1,11 @@
-# 🏛️ Projet Carel : API Intermédiaire de Synchronisation RNE 📊
+# 🏛️ Projet Carel : API Intermédiaire de Synchronisation & Scraping IA 📊
 
-Cette API locale développée avec FastAPI est une brique métier essentielle pour synchroniser les données des élus français depuis le RNE (Répertoire National des Élus) ainsi que depuis des scrapers dynamiques, vers un processus d'automatisation N8N et finalement un CRM Salesforce.
+Cette API locale développée avec FastAPI est la brique métier vitale pour synchroniser les données des élus français depuis le RNE (Data.gouv) tout en offrant un système avancé de Scraping Web par IA, le tout couplé à un processus d'automatisation N8N vers Salesforce.
 
 ## 🎯 Problème Métier Résolu
 
-L'envoi brut des données du RNE via N8N vers Salesforce entraînait des coûts par action considérables.
-Ce projet résout cette problématique en agissant comme un **entonnoir intelligent** (filtres par cibles, algorithmes de 'Diff', comparaison anti-dette avec l'état Salesforce existant), ce qui réduit la taille des payloads de >80% et optimise drastiquement le coût d'intégration.
+L'envoi brut des données vers Salesforce via N8N entraîne des coûts et des lenteurs considérables. De plus, les élections partielles ou démissions rendent le RNE souvent obsolète de plusieurs mois.
+Ce projet résout ces problématiques avec une architecture **SQLite ultra-légère** (Upsert local) et agit comme un **entonnoir intelligent** anti-dette. En cas de donnée manquante, le moteur intègre un Scraper IA 100% autonome pour collecter l'information en temps réel sur le web, avant la mise à jour de l'État.
 
 ---
 
@@ -13,34 +13,32 @@ Ce projet résout cette problématique en agissant comme un **entonnoir intellig
 
 ### 🔄 Endpoints (Sécurisés par `X-API-Key`)
 
-1. **`GET /api/v1/commune/{insee}/cibles`** (Filtrage)
-   - Retourne **exclusivement** les élus considérés comme "Cibles" (ex: "Maire", "Adjoint"). Élimine les conseillers simples pour limiter les volumes N8N.
-2. **`POST /api/v1/sync/batch`** (Traitement par Lot Périodique)
-   - Permet d'envoyer un tableau (batch) de codes INSEE. Lance la synchronisation correspondante en arrière-plan sans bloquer N8N (asynchrone), idéal pour un lissage complet.
+1. **`GET /api/v1/commune/{insee}/cibles`** (Filtrage de Haute Précision)
+   - Retourne **exclusivement** les exécutifs (Maire, Adjoint, Président, Vice-Président, Délégué). Élimine les simples conseillers pour cibler les décideurs.
+
+2. **`POST /api/v1/scrape/url`** (Scraping Universel & Spidering IA)
+   - L'innovation du projet : À partir d'un simple nom de domaine (ex: `montpellier.fr`), l'API trouve de façon autonome la sous-page web des élus (Spidering Hybride).
+   - Utilise **Mistral-small** (IA LLM) pour analyser la page web, comprendre la structure (peu importe le CMS de la commune), extraire le nom/prénom/poste de l'élu et l'injecter immédiatement en base SQLite `rne_data.db`.
+   - Résistance Anti-Bot (TLS Spoofing) avec `curl_cffi` impitoyable face à Cloudflare.
 
 3. **`POST /api/v1/compare/salesforce`** (Algorithme "Anti-Dette")
-   - Reçoit l'état d'un lot d'élus dans le CRM (Salesforce) et le compare à l'état local du RNE.
-   - Expose en retour **exclusivement** les élus qui nécessitent un ajout (CREATE) ou une modification (UPDATE). Le reste est ignoré.
-
-4. **`POST /api/v1/scrape/url`** (Scraping Dynamique à J+1)
-   - Permet de scanner l'URL renseignée (ex: Mairie de Toulouse, Lyon, etc.), de récupérer le personnel élu mis à jour post-élection, et d'injecter cette donnée en RAM/Disque directement, avant que le Datalake étatique ne soit mis à jour.
+   - Reçoit l'état matériel d'un lot d'élus dans Salesforce et le compare au cache SQLite.
+   - Expose en retour **strictement** les élus qui nécessitent un `CREATE` ou un `UPDATE`, neutralisant les appels N8N redondants.
 
 ### 🧠 Structure et Sécurité
 
-- **Swagger/Docs automatique** sur : `http://127.0.0.1:8000/docs`.
-- **Mémoire cache persistante** : Toutes les modifications (scrape, batch, download complet RNE) sont gardées dans un verrou protégé par un Thème de Thread (`Thread.Lock`), et persistées en Json local (`rne_state.json`) pour préserver les requêtes serveur et garantir l'idempotence.
-- **Pydantic Models** : Assurent que n'importe quelle requête envoyée par N8N qui serait imparfaitement formatée sera gracieusement rejetée et clairement logguée (Code 422 standard HTTP).
+- **Base de données SQLite (`rne_data.db`)** : Utilisée comme cache local rapide avec mode WAL pour la concurrence. Ne dépend plus de l'ancien `rne_state.json`.
+- **Mémoire cache persistante Spidering** : Les URL web d'élus découvertes sont mémorisées dans la table `communes_urls` pour éviter de balayer deux fois le site d'une même commune.
+- **Pydantic Models** : Assurent que toute requête envoyée par N8N qui serait imparfaitement formatée sera gracieusement rejetée et logguée.
 
 ---
 
-## 🛠️ Installation et Démarrage Rapide
+## 🛠️ Installation et Démarrage
 
 1. **Cloner / Décompresser** le projet dans votre répertoire.
 2. **Créer l'environnement virtuel** :
    ```bash
    python -m venv venv
-   # Sous Mac/Linux :
-   source venv/bin/activate
    # Sous Windows :
    .\\venv\\Scripts\\activate
    ```
@@ -48,21 +46,20 @@ Ce projet résout cette problématique en agissant comme un **entonnoir intellig
    ```bash
    pip install -r requirements.txt
    ```
-4. **Lancement du serveur** :
+4. **Fichier `.env` requis** :
+   Créer un fichier contenant impérativement la clé API du LLM :
+   `MISTRAL_API_KEY=votre_cle_ici`
+5. **Lancement du serveur** :
    ```bash
    python api.py
    # Ou
    uvicorn api:app --host 127.0.0.1 --port 8000 --reload
    ```
 
-_(Par défaut la clé API d'accès exigée via le Header `X-API-Key` est : `super-secret-key-carel-2026`, sauf si la variable d'environnement `RNE_API_KEY` est spécifiée)._
-
 ## 🧹 Architecture Globale
 
-Le projet s'appuie sur une architecture logicielle modulaire :
-
-- `api.py` : Entrées/sorties logiques, routing (endpoints), modèles de validation (Pydantic) et sécurisation.
-- `rne_differ.py` : Logique de comparaison des listes d'élus, et interface de chargement/sauvegarde de la data en cache local (le composant clé du 'diff').
-- `sync_rne.py` : Script global gérant les transferts massifs RNE vers le Webhook N8N.
-- `scraper.py` : Web scrapers spécifiques à des villes appelées dynamiquement.
-- `rne_parser` & `rne_downloader` : Utilitaires pour télécharger et ingérer les CSV du DataGouv.
+- `api.py` : Entrées/sorties logiques, routing (endpoints), modèles de validation (Pydantic), et sécurisation.
+- `database.py` : Gestion du Singleton de connexion SQLite et intégrité des tables.
+- `scraper.py` : Moteur IA de scraping universel (Mistral), Auto-Spidering (Fallback DOM/URL Soft 404/Sitemap), et module Anti-Bot (Spoofing TLS impersonate "Chrome").
+- `sync_rne.py` / `rne_parser.py` : Utilitaires pour télécharger et ingérer le référentiel d'État complet.
+- `render.yaml` : Fichier de configuration d'Infrastructure-as-code pour un déploiement cloud fluide sur Render (limite stricte 512 Mo RAM respectée par stream sitemap et absence de Selenium).
