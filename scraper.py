@@ -33,7 +33,14 @@ def clean_html_to_text(html_content):
     for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'svg', 'iframe']):
         tag.decompose()
         
-    text = soup.get_text(separator=' ', strip=True)
+    # Recherche de la balise de contenu principal
+    main_content = soup.find('main') or soup.find('div', id='content') or soup.find('article')
+    
+    if main_content:
+        text = main_content.get_text(separator=' ', strip=True)
+    else:
+        text = soup.find('body').get_text(separator=' ', strip=True) if soup.find('body') else soup.get_text(separator=' ', strip=True)
+        
     # Remplacer les espaces multiples par un seul
     text = re.sub(r'\s+', ' ', text)
     
