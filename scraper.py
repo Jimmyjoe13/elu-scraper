@@ -143,14 +143,16 @@ def find_elus_url(root_domain: str) -> str:
         soup = BeautifulSoup(response.text, 'html.parser')
         links = soup.find_all('a', href=True)
         
-        keywords_homepage = ["elu", "conseil-municipal", "equipe-municipale", "maire", "vos-elus"]
+        keywords_href = ["/elu", "-elu", "elu-", "conseil-municipal", "equipe-municipale", "maire", "vos-elus", "trombinoscope"]
         
         for link in links:
             href = link.get('href', '').lower()
             text = link.get_text(strip=True).lower()
             
-            # Si un mot-clé correspond dans le href ou dans le texte du lien
-            if any(kw in href for kw in keywords_homepage) or any(kw in text.replace('é', 'e') for kw in keywords_homepage):
+            href_match = any(kw in href for kw in keywords_href)
+            text_match = re.search(r'\b(élu|élus|maire|conseil municipal|équipe municipale|vos élus)\b', text)
+            
+            if href_match or text_match:
                 exact_url = urljoin(root_domain, link['href'])
                 logging.info(f"URL exacte trouvée via Homepage crawl : {exact_url}")
                 return exact_url
@@ -213,19 +215,12 @@ def find_elus_url(root_domain: str) -> str:
 
 # --- Exécution standalone de Test ---
 if __name__ == "__main__":
-    test_root_domain = "https://www.montpellier.fr" # Ville de Montpellier
-    test_insee = "34172"
+    test_url = "https://www.lyon.fr/actions-et-projets/le-conseil-municipal/trombinoscope-du-conseil-municipal" # Ville de Lyon
+    test_insee = "69123"
     
-    print(f"--- Test de Spidering sur {test_root_domain} ---")
-    exact_url = find_elus_url(test_root_domain)
-    
-    if exact_url:
-        print(f"URL exacte trouvée : {exact_url}")
-        print("--- Test de l'Extraction Mistral IA ---")
-        try:
-            resultats = scrape_universal_url(exact_url, test_insee)
-            print(json.dumps(resultats, indent=2, ensure_ascii=False))
-        except Exception as e:
-            print(f"Test d'extraction échoué : {e}")
-    else:
-        print("Le Spider n'a pas trouvé la page. Test d'extraction annulé.")
+    print(f"--- Test de l'Extraction Mistral IA sur {test_url} ---")
+    try:
+        resultats = scrape_universal_url(test_url, test_insee)
+        print(json.dumps(resultats, indent=2, ensure_ascii=False))
+    except Exception as e:
+        print(f"Test d'extraction échoué : {e}")
