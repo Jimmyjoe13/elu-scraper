@@ -132,39 +132,62 @@ def scrape_universal_url(url, code_insee):
 
 def find_elus_url(root_domain: str) -> str:
     """
-    Auto-découverte experte (Spidering de surface).
-    Récupère la page d'accueil, extrait les liens et retourne l'URL exacte des élus 
-    en cherchant des mots-clés. Profondeur de recherche = 1.
+    Auto-découverte Hybride (Dictionnaire + Sitemap Streamé).
+    Minimise l'impact RAM et accélère la découverte en évitant le parsage du DOM ou le chargement complet des fichiers XML.
     """
     if not root_domain.startswith("http"):
         root_domain = f"https://{root_domain}"
         
-    logging.info(f"Spidering en cours sur le domaine racine : {root_domain}")
-    try:
-        response = requests.get(root_domain, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = soup.find_all('a', href=True)
-        
-        keywords = ["elu", "conseil-municipal", "equipe-municipale", "vos-elus", "maire"]
-        
-        for link in links:
-            href = link.get('href', '').lower()
-            text = link.get_text(strip=True).lower()
+    logging.info(f"Spidering Hybride en cours sur le domaine racine : {root_domain}")
+    
+    # --- ÉTAPE 1 : Fast-Check par Dictionnaire ---
+    common_paths = [
+        "/le-conseil-municipal", 
+        "/equipe-municipale", 
+        "/les-elus", 
+        "/mairie/le-conseil-municipal"
+    ]
+    
+    for path in common_paths:
+        test_url = urljoin(root_domain, path)
+        try:
+            head_response = requests.head(test_url, headers=HEADERS, timeout=3, allow_redirects=True)
+            if head_response.status_code == 200:
+                logging.info(f"URL exacte trouvée instantanément via Fast-Check : {test_url}")
+                return test_url
+        except Exception:
+            pass
             
-            # Si un mot-clé correspond dans le href ou dans le texte du lien
-            if any(kw in href for kw in keywords) or any(kw in text.replace('é', 'e') for kw in keywords):
-                exact_url = urljoin(root_domain, link['href'])
-                logging.info(f"URL exacte trouvée via le spider : {exact_url}")
-                return exact_url
-                
-        logging.warning("Le spidering n'a trouvé aucune URL pertinente depuis la racine.")
-        return None
-        
-    except Exception as e:
-        logging.error(f"Erreur HTTP pendant le spidering de {root_domain}: {e}")
-        return None
+    # --- ÉTAPE 2 : Recherche via Sitemap Streamé ---
+    sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml"]
+    keywords = ["elu", "conseil-municipal", "equipe"]
+    
+    for sitemap_path in sitemap_paths:
+        sitemap_url = urljoin(root_domain, sitemap_path)
+        try:
+            # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
+            with requests.get(sitemap_url, headers=HEADERS, timeout=10, stream=True) as response:
+                if response.status_code == 200:
+                    logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
+                    
+                    for line_bytes in response.iter_lines():
+                        if not line_bytes: continue
+                        
+                        line = line_bytes.decode('utf-8', errors='ignore').lower()
+                        # Test natif et Regex en un seul passage ciblé
+                        if '<loc>' in line and any(kw in line for kw in keywords):
+                            match = re.search(r'<loc>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</loc>', line, re.IGNORECASE)
+                            if match:
+                                exact_url = match.group(1).strip()
+                                logging.info(f"URL exacte trouvée via Sitemap streamé : {exact_url}")
+                                return exact_url
+                                
+        except Exception as e:
+            logging.warning(f"Sitemap injoignable ({sitemap_url}) : {e}")
+            continue
+            
+    logging.warning(f"Le Spidering Hybride n'a trouvé aucune URL pertinente pour {root_domain}.")
+    return None
 
 # --- Exécution standalone de Test ---
 if __name__ == "__main__":
