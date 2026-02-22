@@ -26,26 +26,24 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
 
 def clean_html_to_text(html_content):
-    """Extrait efficacement le texte brut pertinent d'une page."""
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Suppression des balises inutiles pouvant saturer le LLM
-    for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'svg', 'iframe']):
-        tag.decompose()
+    # 1. Détruire tout le "bruit" (menus, footers, scripts, popups)
+    for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'noscript', 'iframe']):
+        element.decompose()
         
-    # Recherche de la balise de contenu principal
-    main_content = soup.find('main') or soup.find('div', id='content') or soup.find('article')
+    # 2. Chercher la zone de contenu principal
+    main_content = soup.find('main') or soup.find(id=re.compile('content|main', re.I)) or soup.find('article')
     
     if main_content:
         text = main_content.get_text(separator=' ', strip=True)
     else:
-        text = soup.find('body').get_text(separator=' ', strip=True) if soup.find('body') else soup.get_text(separator=' ', strip=True)
+        # Fallback si pas de balise principale claire
+        text = soup.get_text(separator=' ', strip=True)
         
-    # Remplacer les espaces multiples par un seul
-    text = re.sub(r'\s+', ' ', text)
-    
-    # On limite raisonnablement la taille du texte à ~30k caractères (budget tokens Mistral)
-    return text[:30000]
+    # 3. Nettoyer les espaces multiples
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def extract_elus_with_mistral(text_input):
     """Appel à l'API Mistral AI pour l'extraction de l'entité / NLP."""
@@ -114,7 +112,7 @@ def scrape_universal_url(url, code_insee):
     """
     logging.info(f"Début du scraping universel pour l'URL: {url} (INSEE: {code_insee})")
     try:
-        response = curequests.get(url, impersonate="chrome110", timeout=20)
+        response = curequests.get(url, impersonate="chrome110", timeout=30)
         response.raise_for_status()
         
         # 1. Obtenir un texte propre
@@ -144,7 +142,7 @@ def find_elus_url(root_domain: str) -> str:
     
     # --- ÉTAPE 1 : Homepage Crawl (Le plus fiable) ---
     try:
-        response = curequests.get(root_domain, impersonate="chrome110", timeout=15)
+        response = curequests.get(root_domain, impersonate="chrome110", timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -180,7 +178,7 @@ def find_elus_url(root_domain: str) -> str:
         test_url = urljoin(root_domain, path)
         try:
             # On utilise GET pour avoir le corps et faire l'anti-soft 404
-            get_response = curequests.get(test_url, impersonate="chrome110", timeout=10, allow_redirects=True)
+            get_response = curequests.get(test_url, impersonate="chrome110", timeout=30, allow_redirects=True)
             if get_response.status_code == 200:
                 text_lower = get_response.text.lower()
                 if any(kw in text_lower for kw in keywords_soft404):
@@ -197,7 +195,7 @@ def find_elus_url(root_domain: str) -> str:
         sitemap_url = urljoin(root_domain, sitemap_path)
         try:
             # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
-            with curequests.get(sitemap_url, impersonate="chrome110", timeout=10, stream=True) as response:
+            with curequests.get(sitemap_url, impersonate="chrome110", timeout=30, stream=True) as response:
                 if response.status_code == 200:
                     logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
                     
