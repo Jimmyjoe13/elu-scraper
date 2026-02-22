@@ -132,35 +132,62 @@ def scrape_universal_url(url, code_insee):
 
 def find_elus_url(root_domain: str) -> str:
     """
-    Auto-découverte Hybride (Dictionnaire + Sitemap Streamé).
-    Minimise l'impact RAM et accélère la découverte en évitant le parsage du DOM ou le chargement complet des fichiers XML.
+    Auto-découverte experte avec trois niveaux de fallback.
+    Minimise l'impact RAM et accélère la découverte.
     """
     if not root_domain.startswith("http"):
         root_domain = f"https://{root_domain}"
         
-    logging.info(f"Spidering Hybride en cours sur le domaine racine : {root_domain}")
+    logging.info(f"Spidering en cours sur le domaine racine : {root_domain}")
     
-    # --- ÉTAPE 1 : Fast-Check par Dictionnaire ---
+    # --- ÉTAPE 1 : Homepage Crawl (Le plus fiable) ---
+    try:
+        response = requests.get(root_domain, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        links = soup.find_all('a', href=True)
+        
+        keywords_homepage = ["elu", "conseil-municipal", "equipe-municipale", "maire", "vos-elus"]
+        
+        for link in links:
+            href = link.get('href', '').lower()
+            text = link.get_text(strip=True).lower()
+            
+            # Si un mot-clé correspond dans le href ou dans le texte du lien
+            if any(kw in href for kw in keywords_homepage) or any(kw in text.replace('é', 'e') for kw in keywords_homepage):
+                exact_url = urljoin(root_domain, link['href'])
+                logging.info(f"URL exacte trouvée via Homepage crawl : {exact_url}")
+                return exact_url
+    except Exception as e:
+        logging.warning(f"Homepage crawl échoué pour {root_domain}: {e}")
+
+    # --- ÉTAPE 2 : Fast-Check avec Anti-Soft 404 ---
     common_paths = [
+        "/les-institutions-de-la-ville-et-de-la-metropole/elus-municipaux/", 
         "/le-conseil-municipal", 
         "/equipe-municipale", 
-        "/les-elus", 
-        "/mairie/le-conseil-municipal"
+        "/les-elus"
     ]
+    
+    keywords_soft404 = ["élu", "elu", "conseil", "maire"]
     
     for path in common_paths:
         test_url = urljoin(root_domain, path)
         try:
-            head_response = requests.head(test_url, headers=HEADERS, timeout=3, allow_redirects=True)
-            if head_response.status_code == 200:
-                logging.info(f"URL exacte trouvée instantanément via Fast-Check : {test_url}")
-                return test_url
+            # On utilise GET pour avoir le corps et faire l'anti-soft 404
+            get_response = requests.get(test_url, headers=HEADERS, timeout=10, allow_redirects=True)
+            if get_response.status_code == 200:
+                text_lower = get_response.text.lower()
+                if any(kw in text_lower for kw in keywords_soft404):
+                    logging.info(f"URL exacte trouvée via Fast-Check itératif (Validé Anti-Soft 404) : {test_url}")
+                    return test_url
         except Exception:
             pass
             
-    # --- ÉTAPE 2 : Recherche via Sitemap Streamé ---
+    # --- ÉTAPE 3 : Recherche via Sitemap Streamé ---
     sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml"]
-    keywords = ["elu", "conseil-municipal", "equipe"]
+    keywords_sitemap = ["elu", "conseil-municipal", "equipe"]
     
     for sitemap_path in sitemap_paths:
         sitemap_url = urljoin(root_domain, sitemap_path)
@@ -175,7 +202,7 @@ def find_elus_url(root_domain: str) -> str:
                         
                         line = line_bytes.decode('utf-8', errors='ignore').lower()
                         # Test natif et Regex en un seul passage ciblé
-                        if '<loc>' in line and any(kw in line for kw in keywords):
+                        if '<loc>' in line and any(kw in line for kw in keywords_sitemap):
                             match = re.search(r'<loc>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</loc>', line, re.IGNORECASE)
                             if match:
                                 exact_url = match.group(1).strip()
@@ -186,7 +213,7 @@ def find_elus_url(root_domain: str) -> str:
             logging.warning(f"Sitemap injoignable ({sitemap_url}) : {e}")
             continue
             
-    logging.warning(f"Le Spidering Hybride n'a trouvé aucune URL pertinente pour {root_domain}.")
+    logging.warning(f"Le Spidering n'a trouvé aucune URL pertinente pour {root_domain}.")
     return None
 
 # --- Exécution standalone de Test ---

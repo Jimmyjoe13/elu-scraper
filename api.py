@@ -438,9 +438,12 @@ def scrape_url_endpoint(request: ScrapeRequest, api_key: str = Depends(get_api_k
         scraped_data = scraper.scrape_universal_url(exact_url, code_insee)
             
         if not scraped_data:
+            # Suppression du cache si on a 0 élus extraits pour éviter le verrou mort sur un Soft 404
+            c.execute("DELETE FROM communes_urls WHERE code_insee = ?", (code_insee,))
+            conn.commit()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Aucune donnée d'élu trouvée ou l'IA n'a pas pu l'extraire depuis l'URL spécifiée."
+                detail="Aucune donnée d'élu trouvée ou l'IA n'a pas pu l'extraire depuis l'URL spécifiée. Le cache a été nettoyé."
             )
             
         batch_elus = {}
