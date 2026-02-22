@@ -12,7 +12,10 @@ import re
 import json
 import logging
 from urllib.parse import urljoin, urlparse
+import urllib3
 from dotenv import load_dotenv
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
@@ -112,7 +115,7 @@ def scrape_universal_url(url, code_insee):
     """
     logging.info(f"Début du scraping universel pour l'URL: {url} (INSEE: {code_insee})")
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
+        response = requests.get(url, headers=HEADERS, timeout=20, verify=False)
         response.raise_for_status()
         
         # 1. Obtenir un texte propre
@@ -142,7 +145,7 @@ def find_elus_url(root_domain: str) -> str:
     
     # --- ÉTAPE 1 : Homepage Crawl (Le plus fiable) ---
     try:
-        response = requests.get(root_domain, headers=HEADERS, timeout=15)
+        response = requests.get(root_domain, headers=HEADERS, timeout=15, verify=False)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -176,7 +179,7 @@ def find_elus_url(root_domain: str) -> str:
         test_url = urljoin(root_domain, path)
         try:
             # On utilise GET pour avoir le corps et faire l'anti-soft 404
-            get_response = requests.get(test_url, headers=HEADERS, timeout=10, allow_redirects=True)
+            get_response = requests.get(test_url, headers=HEADERS, timeout=10, allow_redirects=True, verify=False)
             if get_response.status_code == 200:
                 text_lower = get_response.text.lower()
                 if any(kw in text_lower for kw in keywords_soft404):
@@ -193,7 +196,7 @@ def find_elus_url(root_domain: str) -> str:
         sitemap_url = urljoin(root_domain, sitemap_path)
         try:
             # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
-            with requests.get(sitemap_url, headers=HEADERS, timeout=10, stream=True) as response:
+            with requests.get(sitemap_url, headers=HEADERS, timeout=10, stream=True, verify=False) as response:
                 if response.status_code == 200:
                     logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
                     
