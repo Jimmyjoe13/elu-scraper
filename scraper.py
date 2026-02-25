@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import logging
+import csv
 from urllib.parse import urljoin, urlparse
 import urllib3
 import re
@@ -105,30 +106,94 @@ Texte web à traiter:
         logging.error(f"Erreur avec Mistral API: {e}")
         return []
 
-def scrape_universal_url(url, code_insee):
+def parse_salesforce_csv(filepath):
+    """Lit un fichier CSV et renvoie une liste de dictionnaires."""
+    encodings = ['utf-8-sig', 'windows-1252', 'iso-8859-1', 'cp850', 'mac_roman']
+    
+    for enc in encodings:
+        try:
+            with open(filepath, mode='r', encoding=enc) as f:
+                f.read(100) # Test de lecture
+            with open(filepath, mode='r', encoding=enc) as f:
+                reader = csv.DictReader(f, delimiter=';')
+                return list(reader)
+        except UnicodeDecodeError:
+            continue
+    raise Exception(f"Impossible de lire le fichier CSV {filepath} avec les encodages testés.")
+
+def get_mairie_url(code_postal, ville):
     """
-    Fonction principale: Va chercher n'importe quelle URL de mairie, et extracte via IA.
-    Retourne la liste d'attributs des élus (Dict).
+    Récupère l'URL de la mairie.
+    Pour le POC: Dictionnaire en dur, sinon simulation API publique.
     """
-    logging.info(f"Début du scraping universel pour l'URL: {url} (INSEE: {code_insee})")
+    ville_upper = ville.upper().strip()
+    
+    # Dictionnaire POC
+    poc_urls = {
+        "PARIS": "https://www.paris.fr/",
+        "LYON": "https://www.lyon.fr/",
+        "MARSEILLE": "https://www.marseille.fr/",
+        "NANTES": "https://metropole.nantes.fr/",
+        "BORDEAUX": "https://www.bordeaux.fr/"
+    }
+    
+    for p, url_p in poc_urls.items():
+        if p in ville_upper:
+            return url_p
+    
+    # Simulation d'un appel à l'API publique (Open Data) pour les autres villes
+    # Exemple: api-lannuaire.service-public.fr ou équivalent
+    # url_api = f"https://api-lannuaire.service-public.fr/api/explore/v2.1/catalog/datasets/api-lannuaire-administration/records?where=code_postal={code_postal}&where=pivot=mairie"
+    # response = requests.get(url_api)
+    # url_mairie = response.json()...
+    
+    logging.info(f"Simulation API publique pour obtenir l'URL de {ville} ({code_postal})")
+    # Retour au format URL factice / standard probable
+    return f"https://www.{ville_upper.lower().replace(' ', '')}.fr"
+
+def hybrid_scrape(url, commune_nom):
+    """
+    Extraction hybride sans coût Mistral excessif.
+    Mistral est utilisé UNIQUEMENT pour PLM.
+    """
+    plm_cities = ["PARIS", "LYON", "MARSEILLE"]
+    is_plm = any(p in commune_nom.upper() for p in plm_cities)
+    
+    logging.info(f"Début extraction hybride pour {commune_nom} (PLM: {is_plm}) via: {url}")
     try:
         response = curequests.get(url, impersonate="chrome110", timeout=30, verify=False)
         response.raise_for_status()
         
-        # 1. Obtenir un texte propre
         clean_text = clean_html_to_text(response.text)
-        if len(clean_text) < 100:
-            logging.warning("Le texte de la page semble vide ou rendu côté client (JavaScript). L'extraction risque de rater.")
-            
-        # 2. Convertir en JSON via Mistral AI
-        elus_extraits = extract_elus_with_mistral(clean_text)
-        logging.info(f"{len(elus_extraits)} élus extraits depuis la page.")
         
-        return elus_extraits
+        if is_plm:
+            logging.info("Ville complexe (PLM). Activation de Mistral forcé.")
+            return extract_elus_with_mistral(clean_text)
+            
+        # Extraction Regex sans fallback Mistral (anti coût astronomique)
+        elus = []
+        
+        # Regex basique pour trouver ex: "Maire : Jean DUPONT"
+        matches = re.findall(r'(?:Maire|Le Maire|La Maire)\s*:?\s*([A-Z][a-zA-Z\s\-]+[A-Z]+)', clean_text)
+        for match in matches:
+            elus.append({"prenom": "", "nom": match.strip(), "poste": "Maire"})
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        # Recherche basique de blocs d'élus
+        for element in soup.find_all(['h2', 'h3', 'p', 'li']):
+            texte = element.get_text(strip=True).replace('\\n', ' ')
+            texte_lower = texte.lower()
+            if 'adjoint' in texte_lower and len(texte) < 150:
+                elus.append({"prenom": "", "nom": texte.upper(), "poste": "Adjoint"})
+            elif 'conseill' in texte_lower and len(texte) < 150:
+                elus.append({"prenom": "", "nom": texte.upper(), "poste": "Conseiller"})
+                
+        logging.info(f"{len(elus)} élus trouvés avec extraction Regex/BS4 (Coût 0).")
+        return elus
         
     except Exception as e:
         logging.error(f"Échec de l'extraction sur {url}: {e}")
-        raise e
+        return []
 
 def find_elus_url(root_domain: str) -> str:
     """
@@ -194,8 +259,9 @@ def find_elus_url(root_domain: str) -> str:
     for sitemap_path in sitemap_paths:
         sitemap_url = urljoin(root_domain, sitemap_path)
         try:
-            # stream=True est indispensable pour lire un gros Sitemap sans le stocker en RAM
-            with curequests.get(sitemap_url, impersonate="chrome110", timeout=30, stream=True, verify=False) as response:
+            import requests as standard_requests
+            # fallback au module requests classique pour préserver stream=True (curl_cffi ne le gère pas)
+            with standard_requests.get(sitemap_url, timeout=30, stream=True, verify=False) as response:
                 if response.status_code == 200:
                     logging.info(f"Analyse streamée du Sitemap en cours : {sitemap_url}")
                     
@@ -220,12 +286,61 @@ def find_elus_url(root_domain: str) -> str:
 
 # --- Exécution standalone de Test ---
 if __name__ == "__main__":
-    test_url = "https://www.lyon.fr/actions-et-projets/le-conseil-municipal/trombinoscope-du-conseil-municipal" # Ville de Lyon
-    test_insee = "69123"
+    import sys
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     
-    print(f"--- Test de l'Extraction Mistral IA sur {test_url} ---")
+    # Remplacer par le chemin de ton CSV
+    csv_path = r"C:\Users\jimmy\OneDrive\Desktop\Professionnel\Projet Carel\elu-scraper\Fichier forgeron3 test mandat contrat.csv"
+    
     try:
-        resultats = scrape_universal_url(test_url, test_insee)
-        print(json.dumps(resultats, indent=2, ensure_ascii=False))
+        data = parse_salesforce_csv(csv_path)
     except Exception as e:
-        print(f"Test d'extraction échoué : {e}")
+        logging.error(f"Erreur à la lecture du CSV: {e}")
+        sys.exit(1)
+        
+    logging.info(f"{len(data)} lignes lues depuis le CSV.")
+    
+    # Boucle sur l'ensemble du fichier
+    for row in data:
+        # Récupération dynamique des clés car l'encodage du CSV peut corrompre certains noms de colonnes ("Mandat: Mandat Name")
+        ville = next((v for k, v in row.items() if k and 'ville' in k.lower()), "")
+        if not ville:
+            ville = next((v for k, v in row.items() if k and 'collectivit' in k.lower()), "")
+            
+        code_postal = next((v for k, v in row.items() if k and 'postal' in k.lower()), "")
+        mandat_name = next((v for k, v in row.items() if k and 'mandat name' in k.lower()), "")
+        nom_lu = next((v for k, v in row.items() if k and 'lu : nom' in k.lower()), "")
+        if not nom_lu:
+            nom_lu = next((v for k, v in row.items() if k and k.lower() == 'nom'), "")
+            
+        if not ville:
+            continue
+            
+        print(f"\n--- Traitement de: {ville} (Mandat: {mandat_name}) ---")
+        
+        url = get_mairie_url(code_postal, ville)
+        elus_extraits = []
+        if url:
+             # Utilise auto-découverte (spider) ou URL simple si le spider échoue
+             url_elus = find_elus_url(url) or url
+             elus_extraits = hybrid_scrape(url_elus, ville)
+             
+        # Formater un payload JSON pour N8N. Utilisation de mandat_name pour l'identifier côté webhook puisqu'il n'y a pas d'ID Salesforce direct.
+        payload = {
+            "mandat_name": mandat_name,
+            "ville": ville,
+            "code_postal": code_postal,
+            "csv_elu_nom": nom_lu,
+            "url_source": url,
+            "elus_extraits": elus_extraits
+        }
+        
+        logging.info(f"Payload prêt pour N8N: Ville {ville} - {len(elus_extraits)} élus (Mandat: {mandat_name})")
+        
+        # POST vers le Webhook N8N
+        try:
+            response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+            logging.info(f"Webhook response: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Erreur d'envoi Webhook pour {ville}: {e}")
+
