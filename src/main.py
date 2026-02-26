@@ -1,6 +1,8 @@
 import asyncio
 import aiohttp
 import logging
+import os
+import aiosqlite
 from typing import List, Dict
 
 from src.parsers.factory import ParserFactory
@@ -14,7 +16,7 @@ import src.parsers.plugins.paris_lutece_v1
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-WEBHOOK_URL = "https://n8n.votredomaine.com/webhook/elus"
+WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
 
 async def send_to_n8n(session: aiohttp.ClientSession, mandates: List[ElectedOfficialMandate]):
     """Envoi du flux sortant (1 ligne = 1 mandat) vers N8N."""
@@ -65,16 +67,31 @@ async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict) ->
         
     return mandates
 
+async def load_urls_from_db(db_path: str) -> List[Dict]:
+    urls = []
+    if not os.path.exists(db_path):
+        logger.error(f"Base de données introuvable : {db_path}")
+        return urls
+        
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT url, parser_template, ville FROM source_urls WHERE is_active = 1") as cursor:
+            async for row in cursor:
+                urls.append({
+                    "url": row["url"],
+                    "parser_template": row["parser_template"],
+                    "ville_ou_secteur": row["ville"]
+                })
+    return urls
+
 async def main():
-    # Simulation d'un dispatcher (lecture CSV/DB/Dict de configuration)
-    dispatcher_tasks = [
-        {
-            "url": "https://www.paris.fr/pages/les-elus", 
-            "parser_template": "paris_lutece_v1", 
-            "ville_ou_secteur": "Paris"
-        },
-        # {"url": "https://lyon.fr/elus", "parser_template": "lyon_drupal_v1", "ville_ou_secteur": "Lyon"},
-    ]
+    # Détermination du chemin de la BDD (à la racine du projet)
+    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'elus_sources.db')
+    
+    dispatcher_tasks = await load_urls_from_db(db_path)
+    if not dispatcher_tasks:
+        logger.warning("Aucune URL active à traiter. Fin du script.")
+        return
 
     cache = await DiffCacheManager.load()
     new_mandates: List[ElectedOfficialMandate] = []
