@@ -26,13 +26,20 @@ def init_db():
         ('Paris', 'Arrondissement', 'https://mairie08.paris.fr/municipalite', 'paris_lutece_v1'),
         ('Lyon', 'Ville', 'https://www.lyon.fr/actions-et-projets/le-maire-et-les-elus/les-conseilleres-et-conseillers-municipaux', 'lyon_drupal_v1'),
         ('Lyon', 'Arrondissement', 'https://mairie2.lyon.fr/conseil_arrondissement', 'lyon_drupal_v1'),
-        ('Marseille', 'Ville', 'https://www.marseille.fr/mairie/conseil-municipal/elus', 'marseille_pdf_v1')
+        ('Marseille', 'Ville', 'https://www.marseille.fr/mairie/conseil-municipal/elus', 'marseille_html_v1')
     ]
 
     cursor.executemany('''
         INSERT OR IGNORE INTO source_urls (ville, scope, url, parser_template)
         VALUES (?, ?, ?, ?)
     ''', data)
+
+    # Update any existing marseille_pdf_v1 to marseille_html_v1 just in case
+    cursor.execute('''
+        UPDATE source_urls
+        SET parser_template = 'marseille_html_v1'
+        WHERE parser_template = 'marseille_pdf_v1'
+    ''')
 
     conn.commit()
     conn.close()

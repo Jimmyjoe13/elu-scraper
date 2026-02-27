@@ -11,7 +11,8 @@ from src.models.mandate import ElectedOfficialMandate
 
 # Initialisation des parsers pour enregistrement dans la Factory
 import src.parsers.plugins.paris_lutece_v1
-# import src.parsers.plugins.lyon_drupal_v1  # Ajouter les autres templates ici
+import src.parsers.plugins.lyon_drupal_v1
+import src.parsers.plugins.marseille_html_v1
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -109,9 +110,17 @@ async def main():
             elif isinstance(res, Exception):
                 logger.error(f"Erreur d'exécution concurrente asynchrone: {res}")
                 
+        # Global deduplication by id_technique
+        deduped = {}
+        for m in new_mandates:
+            if m.id_technique not in deduped:
+                deduped[m.id_technique] = m
+        
+        new_mandates = list(deduped.values())
+
         # Bulk Upload
         if new_mandates:
-            logger.info(f"Opération terminée. {len(new_mandates)} nouveaux mandats modélisés.")
+            logger.info(f"Opération terminée. {len(new_mandates)} mandats uniques modélisés.")
             await send_to_n8n(session, new_mandates)
             await DiffCacheManager.save(cache)
         else:
