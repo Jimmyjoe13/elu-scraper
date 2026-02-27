@@ -39,17 +39,24 @@ async def find_city_website(session: aiohttp.ClientSession, nom_commune: str, co
     # Étape 3 : Fallback DuckDuckGo HTML Lite (sans clé API)
     logger.info(f"Fallback : Recherche d'URL pour {nom_commune} ({code_postal}) via DuckDuckGo...")
     try:
-        query = urllib.parse.quote_plus(f"site officiel mairie {nom_commune} {code_postal}")
+        # Recherche précise demandée
+        query = urllib.parse.quote_plus(f"site officiel mairie {nom_commune}")
         ddg_url = f"https://html.duckduckgo.com/html/?q={query}"
-        async with session.get(ddg_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}) as ddg_res:
+        async with session.get(ddg_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}) as ddg_res:
             if ddg_res.status == 200:
                 html = await ddg_res.text()
                 soup = BeautifulSoup(html, "html.parser")
                 
                 for a in soup.select(".result__url"):
                     text = a.get_text(strip=True).replace(" ", "")
-                    # Exclusion de domaines non-officiels
-                    if "wikipedia." in text or "facebook." in text or "service-public.fr" in text or "annuaire-" in text or "lannuaire.service" in text:
+                    # Exclusion stricte des annuaires et sites d'info
+                    exclusions = [
+                        "wikipedia.", "facebook.", "service-public.fr", "annuaire-", 
+                        "lannuaire.service", "mon-maire.fr", "mon-maire.", "pagesjaunes.fr",
+                        "linternaute.com", "ville-data.com"
+                    ]
+                    
+                    if any(excl in text.lower() for excl in exclusions):
                         continue
                     
                     if not text.startswith("http"):

@@ -105,6 +105,17 @@ def get_villes_cp_map(csv_path: str) -> dict:
                     vmap[v] = cp
     return vmap
 
+def get_strate_priorite(ville: str) -> str:
+    """Déduit la taille de la commune (Strate) pour prioriser l'alerte."""
+    v_norm = normalize_string(ville)
+    grandes_villes = ["paris", "lyon", "marseille", "toulouse", "nice", "nantes", "montpellier", "strasbourg", "bordeaux", "lille", "rennes"]
+    
+    # Heuristique basique : on identifie les villes majeures (> 100k hab)
+    if any(gv in v_norm for gv in grandes_villes):
+        return "1 - Plus de 100k hab"
+        
+    return "Non définie"
+
 def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate]) -> List[dict]:
     """Génère les alertes métier en comparant Photo A (CSV Salesforce) et Photo B (Scraping Web)."""
     alerts = []
@@ -116,6 +127,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         ville_norm = normalize_string(m.ville_ou_secteur)
         
         statut_trouve = m.fonction
+        strate = get_strate_priorite(m.ville_ou_secteur)
         
         # On cherche l'élu dans Photo A
         found_a = photo_a.get(f"{ville_norm}---{nom_complet_norm}") or photo_a.get(f"{ville_norm}---{nom_reverse_norm}")
@@ -128,6 +140,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "alerte_type": "MODIFICATION_FONCTION",
                     "elu": nom_complet,
                     "commune": m.ville_ou_secteur,
+                    "strate_priorite": strate,
                     "statut_salesforce_actuel": statut_actuel,
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
@@ -138,6 +151,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                 "alerte_type": "NOUVEL_ELU_DETECTE",
                 "elu": nom_complet,
                 "commune": m.ville_ou_secteur,
+                "strate_priorite": strate,
                 "statut_salesforce_actuel": "Inconnu en base",
                 "statut_trouve_web": statut_trouve,
                 "source_url_trouvee": m.source_url,
