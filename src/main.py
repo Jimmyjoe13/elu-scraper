@@ -21,18 +21,28 @@ logger = logging.getLogger(__name__)
 WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
 
 async def send_to_n8n(session: aiohttp.ClientSession, payloads: List[dict]):
-    """Envoi du flux sortant vers N8N."""
+    """Envoi du flux sortant vers N8N avec Micro-Batching (50 par lot)."""
     if not payloads:
         return
         
-    try:
-        async with session.post(WEBHOOK_URL, json=payloads) as response:
-            if response.status != 200:
-                logger.error(f"Erreur N8N: Code {response.status}")
-            else:
-                logger.info(f"[{len(payloads)} objets] envoyés avec succès vers N8N.")
-    except Exception as e:
-        logger.error(f"Erreur réseau lors de l'envoi à N8N: {e}")
+    chunk_size = 50
+    chunks = [payloads[i:i + chunk_size] for i in range(0, len(payloads), chunk_size)]
+    total_chunks = len(chunks)
+    
+    for idx, chunk in enumerate(chunks, 1):
+        try:
+            logger.info(f"Envoi du lot {idx}/{total_chunks} ({len(chunk)} alertes) vers N8N...")
+            async with session.post(WEBHOOK_URL, json=chunk) as response:
+                if response.status != 200:
+                    logger.error(f"Erreur N8N sur le lot {idx}: Code {response.status}")
+                else:
+                    logger.debug(f"Lot {idx} envoyé avec succès.")
+        except Exception as e:
+            logger.error(f"Erreur réseau lors de l'envoi du lot {idx} à N8N: {e}")
+            
+        if idx < total_chunks:
+            await asyncio.sleep(0.5)
+
 
 import csv
 import unicodedata
