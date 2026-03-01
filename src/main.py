@@ -22,7 +22,7 @@ import src.parsers.plugins.generic_html_v1
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
+WEBHOOK_URL = "https://n8n.apps.forgeron3.fr/webhook/5638bdee-37b4-4824-a144-973f8a3bad01"
 
 async def send_to_n8n(session: aiohttp.ClientSession, payloads: List[dict]):
     """Envoi du flux sortant vers N8N avec Micro-Batching (50 par lot)."""
@@ -226,7 +226,6 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
                     "niveau_confiance": "HIGH",
-                    "id_salesforce": sf_id,
                     "mandat_name": list_a[0].get("mandat_name", ""),
                     "parti_politique": list_a[0].get("parti_politique", ""),
                     "indicateur_epci": list_a[0].get("indicateur_epci", "")
