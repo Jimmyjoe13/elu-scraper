@@ -3,28 +3,43 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.py[cod]
+*$py.class
 venv/
 env/
+.venv/
 .env
 
-# === Fichiers de données du projet (À ne surtout pas commiter !) ===
-# Dossier contenant les gros fichiers CSV téléchargés depuis data.gouv.fr
-data_rne/
+# === Données Métier & Salesforce (Confidentialité) ===
+# Ne surtout pas commiter les exports Salesforce !
+*.csv
+*mandat*.csv
+*forgeron3*.csv
 
-# Fichier d'état JSON (150+ Mo) contenant toute la France
-rne_state.json
+# === Fichiers de Cache et Bases de données ===
+# On ignore les fichiers SQLite de travail et d'états
+*.sqlite3
+*.db-journal
+*.sqlite
+# Fichier de cache de comparaison scraping
+cache_diff.json
 
-# Fichiers textes et json temporaires liés au scraping RNE
-rne_links.json
-rne_links.txt
+# (Optionnel: si la base elus_sources.db est générée localement, vous pouvez ignorer *.db. 
+# Si elle sert de référentiel partagé, laissez ce paramètre ainsi sans *.db)
 
-# === Scraping HTML (Projet Carel) ===
+# === Scraping & Logs ===
 *.html
+*.log
+*.json
+
+# === Anciens fichiers RNE ===
+data_rne/
+rne_*.json
+rne_*.txt
+rne_data.db
 
 # === OS & IDE ===
 .DS_Store
 .vscode/
 .idea/
 Thumbs.db
-
-__pycache__/
