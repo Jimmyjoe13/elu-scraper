@@ -139,8 +139,12 @@ class SalesforceProvider:
                         "raw_ville": ville.strip()
                     }
                     
-                    photo_a[key_1] = val
-                    photo_a[key_2] = val
+                    # On initialise avec une liste si la clé n'existe pas
+                    if key_1 not in photo_a: photo_a[key_1] = []
+                    if key_2 not in photo_a: photo_a[key_2] = []
+                    
+                    photo_a[key_1].append(val)
+                    photo_a[key_2].append(val)
                     
         return photo_a
 
@@ -195,20 +199,25 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         statut_trouve = m.fonction
         strate = get_strate_priorite(m.ville_ou_secteur)
         
-        # On cherche l'élu dans Photo A
-        found_a = photo_a.get(f"{ville_norm}---{nom_complet_norm}") or photo_a.get(f"{ville_norm}---{nom_reverse_norm}")
+        # On cherche l'élu dans Photo A (qui retourne maintenant une LISTE)
+        list_a = photo_a.get(f"{ville_norm}---{nom_complet_norm}") or photo_a.get(f"{ville_norm}---{nom_reverse_norm}") or []
         
-        if found_a:
-            statut_actuel = found_a["fonction"]
-            if normalize_string(statut_actuel) != normalize_string(statut_trouve):
-                sf_id = found_a["id_salesforce"]
-                # On écrase si l'alerte existe déjà pour cet ID Salesforce
+        if list_a:
+            # Est-ce que le statut trouvé sur le web existe parmi les mandats SF de cet élu ?
+            statut_trouve_norm = normalize_string(statut_trouve)
+            match_found = any(normalize_string(a["fonction"]) == statut_trouve_norm for a in list_a)
+            
+            if not match_found:
+                # On prend le premier ID Salesforce par défaut ou le mandat 'principal' s'il y a une logique
+                sf_id = list_a[0]["id_salesforce"]
+                statuts_actuels = " | ".join([a["fonction"] for a in list_a])
+                
                 alerts_dict[sf_id] = {
                     "alerte_type": "MODIFICATION_FONCTION",
                     "elu": nom_complet,
                     "commune": m.ville_ou_secteur,
                     "strate_priorite": strate,
-                    "statut_salesforce_actuel": statut_actuel,
+                    "statut_salesforce_actuel": statuts_actuels,
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
                     "niveau_confiance": "HIGH",
