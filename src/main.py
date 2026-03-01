@@ -110,6 +110,8 @@ class SalesforceProvider:
                 col_nom = self._find_key(cleaned_headers, ["elunom", "lunom"])
                 col_fonction = self._find_key(cleaned_headers, ["fonctionelective", "fonction"])
                 col_mandat = self._find_key(cleaned_headers, ["mandatmandatname", "mandatname", "mandat"])
+                col_parti = self._find_key(cleaned_headers, ["partipolitique", "parti", "etiquette"])
+                col_epci = self._find_key(cleaned_headers, ["epci", "intercommunalite"])
                 
                 reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
                 for row in reader:
@@ -136,7 +138,10 @@ class SalesforceProvider:
                         "fonction": fonction.strip(),
                         "id_salesforce": mandat_id.strip(),
                         "raw_nom": elu_nom.strip(),
-                        "raw_ville": ville.strip()
+                        "raw_ville": ville.strip(),
+                        "mandat_name": row.get(col_mandat, "").strip() if col_mandat else "",
+                        "parti_politique": row.get(col_parti, "").strip() if col_parti else "",
+                        "indicateur_epci": row.get(col_epci, "").strip() if col_epci else ""
                     }
                     
                     # On initialise avec une liste si la clé n'existe pas
@@ -221,7 +226,10 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
                     "niveau_confiance": "HIGH",
-                    "id_salesforce": sf_id
+                    "id_salesforce": sf_id,
+                    "mandat_name": list_a[0].get("mandat_name", ""),
+                    "parti_politique": list_a[0].get("parti_politique", ""),
+                    "indicateur_epci": list_a[0].get("indicateur_epci", "")
                 }
         else:
             logger.debug(f"Élu {nom_complet} ({m.ville_ou_secteur}) ignoré car absent de Salesforce (Photo A).")
