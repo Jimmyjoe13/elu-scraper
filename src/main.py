@@ -19,7 +19,7 @@ import src.parsers.plugins.lyon_drupal_v1
 import src.parsers.plugins.marseille_html_v1
 import src.parsers.plugins.generic_html_v1
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 WEBHOOK_URL = "https://n8n.media-start.fr/webhook/a14f3c73-e1ce-4700-8113-7ab035a9ae16"
@@ -51,7 +51,7 @@ def normalize_string(s: str) -> str:
     """Normalise une chaîne (minuscule, sans accents) pour un matching robuste."""
     if not s:
         return ""
-    s = s.replace("-", " ")
+    s = str(s).replace("-", " ")
     s = unicodedata.normalize('NFKD', str(s)).encode('ASCII', 'ignore').decode('utf-8')
     return s.strip().lower()
 
@@ -73,13 +73,15 @@ class SalesforceProvider:
         h = re.sub(r'[^a-zA-Z0-9]', '', h)
         return h.lower()
 
-    def _find_key(self, keys: List[str], keywords: List[str]) -> str:
-        """Trouve la clé correspondante basée sur une liste de mots-clés."""
+    def _find_key(self, keys: List[str], exact_matches: List[str]) -> str:
+        # On cherche d'abord une correspondance EXACTE stricte
         for k in keys:
-            if not k:
-                continue
-            for kw in keywords:
-                if kw in k:
+            if k in exact_matches:
+                return k
+        # Fallback partiel si vraiment non trouvé
+        for k in keys:
+            for match in exact_matches:
+                if match in k:
                     return k
         return ""
 
@@ -104,10 +106,10 @@ class SalesforceProvider:
                 cleaned_headers = [self._clean_header(h) for h in headers]
                 
                 # Ciblages basés sur les headers nettoyés
-                col_ville = self._find_key(cleaned_headers, ["ville", "commune"])
-                col_nom = self._find_key(cleaned_headers, ["elunom", "lunom", "nom", "elu"])
-                col_fonction = self._find_key(cleaned_headers, ["fonction", "fonctionelective"])
-                col_mandat = self._find_key(cleaned_headers, ["mandatname", "mandat"])
+                col_ville = self._find_key(cleaned_headers, ["ville"])
+                col_nom = self._find_key(cleaned_headers, ["elunom", "lunom"])
+                col_fonction = self._find_key(cleaned_headers, ["fonctionelective", "fonction"])
+                col_mandat = self._find_key(cleaned_headers, ["mandatmandatname", "mandatname", "mandat"])
                 
                 reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
                 for row in reader:
@@ -182,7 +184,7 @@ def get_strate_priorite(ville: str) -> str:
 
 def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate]) -> List[dict]:
     """Génère les alertes métier en comparant Photo A (CSV Salesforce) et Photo B (Scraping Web)."""
-    alerts = []
+    alerts_dict = {}
     
     for m in mandates:
         nom_complet = f"{m.prenom} {m.nom}"
@@ -199,7 +201,9 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         if found_a:
             statut_actuel = found_a["fonction"]
             if normalize_string(statut_actuel) != normalize_string(statut_trouve):
-                alerts.append({
+                sf_id = found_a["id_salesforce"]
+                # On écrase si l'alerte existe déjà pour cet ID Salesforce
+                alerts_dict[sf_id] = {
                     "alerte_type": "MODIFICATION_FONCTION",
                     "elu": nom_complet,
                     "commune": m.ville_ou_secteur,
@@ -208,12 +212,12 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
                     "niveau_confiance": "HIGH",
-                    "id_salesforce": found_a["id_salesforce"]
-                })
+                    "id_salesforce": sf_id
+                }
         else:
             logger.debug(f"Élu {nom_complet} ({m.ville_ou_secteur}) ignoré car absent de Salesforce (Photo A).")
             
-    return alerts
+    return list(alerts_dict.values())
 
 async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict, map_cp: dict) -> tuple:
     url = row.get("url")
@@ -287,6 +291,7 @@ async def main():
     logger.info("Chargement des données Salesforce (Photo A)...")
     provider = SalesforceProvider(root_dir)
     photo_a = await provider.get_photo_a()
+    logger.debug(f"Nombre de clés chargées dans la Photo A : {len(photo_a)}")
     map_cp = await provider.get_villes_cp_map()
 
     cache = await DiffCacheManager.load()
