@@ -1,65 +1,93 @@
-# 🏛️ Projet Carel : API Intermédiaire de Synchronisation & Scraping IA 📊
+# Elu-Scraper (Projet Carel)
 
-Cette API locale développée avec FastAPI est la brique métier vitale pour synchroniser les données des élus français depuis le RNE (Data.gouv) tout en offrant un système avancé de Scraping Web par IA, le tout couplé à un processus d'automatisation N8N vers Salesforce.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![N8N](https://img.shields.io/badge/N8N-Automation-orange)
+![GitLab Fonderie](https://img.shields.io/badge/GitLab-Fonderie-fc6d26)
 
-## 🎯 Problème Métier Résolu
+Moteur de scraping asynchrone conçu pour l'extraction, la qualification et la mise à jour des fonctions électives de plus de 450 000 élus municipaux français post-élections 2026. Ce système alimente directement le CRM Salesforce de La Carel via des pipelines de données automatisées.
 
-L'envoi brut des données vers Salesforce via N8N entraîne des coûts et des lenteurs considérables. De plus, les élections partielles ou démissions rendent le RNE souvent obsolète de plusieurs mois.
-Ce projet résout ces problématiques avec une architecture **SQLite ultra-légère** (Upsert local) et agit comme un **entonnoir intelligent** anti-dette. En cas de donnée manquante, le moteur intègre un Scraper IA 100% autonome pour collecter l'information en temps réel sur le web, avant la mise à jour de l'État.
+## 📋 Prérequis
 
----
+Pour exécuter ce script en local, l'environnement nécessite l'installation des éléments suivants :
 
-## 🚀 Fonctionnalités Principales
+- **Python 3.10 ou supérieur**
+- Connectivité aux sites web gouvernementaux / municipaux
+- Accès au webhook de validation N8N
 
-### 🔄 Endpoints (Sécurisés par `X-API-Key`)
+### Dépendances Python
 
-1. **`GET /api/v1/commune/{insee}/cibles`** (Filtrage de Haute Précision)
-   - Retourne **exclusivement** les exécutifs (Maire, Adjoint, Président, Vice-Président, Délégué). Élimine les simples conseillers pour cibler les décideurs.
+Les packages requis se retrouvent dans `requirements.txt` :
 
-2. **`POST /api/v1/scrape/url`** (Scraping Universel & Spidering IA)
-   - L'innovation du projet : À partir d'un simple nom de domaine (ex: `montpellier.fr`), l'API trouve de façon autonome la sous-page web des élus (Spidering Hybride).
-   - Utilise **Mistral-small** (IA LLM) pour analyser la page web, comprendre la structure (peu importe le CMS de la commune), extraire le nom/prénom/poste de l'élu et l'injecter immédiatement en base SQLite `rne_data.db`.
-   - Résistance Anti-Bot (TLS Spoofing) avec `curl_cffi` impitoyable face à Cloudflare.
+- `fastapi`, `uvicorn` (Moteur d'API éventuel)
+- `aiohttp`, `requests`, `curl_cffi` (Requêtes asynchrones et synchrones)
+- `beautifulsoup4` (Parsing HTML)
+- `python-dotenv` (Variables d'environnement)
+- `aiosqlite` (Base de données asynchrone des URLs sources)
 
-3. **`POST /api/v1/compare/salesforce`** (Algorithme "Anti-Dette")
-   - Reçoit l'état matériel d'un lot d'élus dans Salesforce et le compare au cache SQLite.
-   - Expose en retour **strictement** les élus qui nécessitent un `CREATE` ou un `UPDATE`, neutralisant les appels N8N redondants.
+## 🛠️ Installation & Configuration
 
-### 🧠 Structure et Sécurité
+Récupérez le projet depuis le dépôt GitLab interne Fonderie et installez l'environnement :
 
-- **Base de données SQLite (`rne_data.db`)** : Utilisée comme cache local rapide avec mode WAL pour la concurrence. Ne dépend plus de l'ancien `rne_state.json`.
-- **Mémoire cache persistante Spidering** : Les URL web d'élus découvertes sont mémorisées dans la table `communes_urls` pour éviter de balayer deux fois le site d'une même commune.
-- **Pydantic Models** : Assurent que toute requête envoyée par N8N qui serait imparfaitement formatée sera gracieusement rejetée et logguée.
+```bash
+# 1. Cloner le répertoire
+git clone https://fonderie.apps.forgeron3.fr/rnd/elu-scraper.git
+cd elu-scraper
 
----
+# 2. Créer et activer l'environnement virtuel
+python -m venv venv
+# Sur Windows:
+venv\Scripts\activate
+# Sur Linux/Mac:
+source venv/bin/activate
 
-## 🛠️ Installation et Démarrage
+# 3. Installer les dépendances
+pip install -r requirements.txt
+```
 
-1. **Cloner / Décompresser** le projet dans votre répertoire.
-2. **Créer l'environnement virtuel** :
-   ```bash
-   python -m venv venv
-   # Sous Windows :
-   .\\venv\\Scripts\\activate
-   ```
-3. **Installer les dépendances** :
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. **Fichier `.env` requis** :
-   Créer un fichier contenant impérativement la clé API du LLM :
-   `MISTRAL_API_KEY=votre_cle_ici`
-5. **Lancement du serveur** :
-   ```bash
-   python api.py
-   # Ou
-   uvicorn api:app --host 127.0.0.1 --port 8000 --reload
-   ```
+_(Assurez-vous également que la base de données SQLite locale `elus_sources.db` ainsi que le fichier de référence CSV prospect/contrat sont à la racine du projet)._
 
-## 🧹 Architecture Globale
+## 🔄 Architecture & Flux (Workflow)
 
-- `api.py` : Entrées/sorties logiques, routing (endpoints), modèles de validation (Pydantic), et sécurisation.
-- `database.py` : Gestion du Singleton de connexion SQLite et intégrité des tables.
-- `scraper.py` : Moteur IA de scraping universel (Mistral), Auto-Spidering (Fallback DOM/URL Soft 404/Sitemap), et module Anti-Bot (Spoofing TLS impersonate "Chrome").
-- `sync_rne.py` / `rne_parser.py` : Utilitaires pour télécharger et ingérer le référentiel d'État complet.
-- `render.yaml` : Fichier de configuration d'Infrastructure-as-code pour un déploiement cloud fluide sur Render (limite stricte 512 Mo RAM respectée par stream sitemap et absence de Selenium).
+Ce projet implémente un système de synchronisation asymétrique _"One-to-Many"_ pour pallier aux cumuls des mandats et aux mutations politiques (Photo A vs Photo B) :
+
+1. **Extraction de Référence (Photo A) :** Le code utilise un `SalesforceProvider` pour ingérer la base de données actuelle (Export CSV Salesforce) incluant tous les mandats, partis politiques, et indications EPCI affiliés aux élus.
+2. **Scraping Dynamique (Photo B) :** L'outil découvre dynamiquement l'URL des mairies (s'ils n'existent pas en base) puis exécute des parsers spécialisés ou génériques pour en extraire la situation actuelle de l'élu via les pages web administratives.
+3. **Filtre Asymétrique & Alertes :** Une comparaison différentielle stricte a lieu. Si une déviation de rôle (ou statut) est détectée, un payload JSON "obèse" enrichi du contexte Salesforce est envoyé vers un **webhook N8N**.
+4. **Validation (N8N vers Salesforce) :** L'orchestrateur N8N hébergé sur Forgeron3 réceptionne le payload, le destine à une interface de validation humaine (via Airtable ou interface N8N), pour finalement réaliser un Push SOQL vers le **CRM Salesforce**.
+
+## 🚀 Usage
+
+### Lancer le scraping complet
+
+Le point d'entrée central du parser comparateur se trouve dans `src/main.py`. L'exécution asynchrone complète (parsing + envoi vers le webhook) s'effectue via :
+
+```bash
+python src/main.py
+```
+
+_Note : Le script traite le fichier en Micro-Batchings conditionnés sur l'empreinte MD5, les pages non-modifiées n'occasionneront donc pas de scrapping et l'API N8N recevra les données par lots différés pour protéger le webhook des surcharges._
+
+## 📁 Structure du projet
+
+```text
+elu-scraper/
+├── Fichier forgeron3 test mandat prospect.csv  # Base de données Salesforce "Photo A" (Contextes)
+├── elus_sources.db                             # Base SQLite locale asynchrone contenant les points d'entrées
+├── requirements.txt                            # Dépendances Python
+├── scraper.py                                  # Moteur de scraping HTML direct
+└── src/
+    ├── main.py                                 # 🚀 Point d'entrée principal (Provider, Comparatif et Webhook N8N)
+    ├── models/
+    │   └── mandate.py                          # Structure Pydantic des élus et de leurs mandats
+    ├── parsers/
+    │   ├── base.py                             # Classe abstraite asynchrone de parsing
+    │   ├── factory.py                          # Factory de sélection du parser adéquat
+    │   └── plugins/
+    │       ├── generic_html_v1.py              # Parsing des structures classiques
+    │       ├── lyon_drupal_v1.py               # Cas spécifique : Ville de Lyon
+    │       ├── marseille_html_v1.py            # Cas spécifique : Ville de Marseille
+    │       └── paris_lutece_v1.py              # Cas spécifique : Ville de Paris
+    └── utils/
+        ├── cache.py                            # Gestionnaire de cache MD5 (Diffing)
+        └── url_finder.py                       # Découverte heuristique des sites web des mairies
+```
