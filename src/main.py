@@ -3,11 +3,15 @@ import aiohttp
 import logging
 import os
 import aiosqlite
+import csv
+import unicodedata
+import re
 from typing import List, Dict
 
 from src.parsers.factory import ParserFactory
 from src.utils.cache import DiffCacheManager
 from src.models.mandate import ElectedOfficialMandate
+from src.utils.url_finder import find_city_website
 
 # Initialisation des parsers pour enregistrement dans la Factory
 import src.parsers.plugins.paris_lutece_v1
@@ -43,11 +47,6 @@ async def send_to_n8n(session: aiohttp.ClientSession, payloads: List[dict]):
         if idx < total_chunks:
             await asyncio.sleep(0.5)
 
-
-import csv
-import unicodedata
-from src.utils.url_finder import find_city_website
-
 def normalize_string(s: str) -> str:
     """Normalise une chaîne (minuscule, sans accents) pour un matching robuste."""
     if not s:
@@ -55,62 +54,126 @@ def normalize_string(s: str) -> str:
     s = unicodedata.normalize('NFKD', str(s)).encode('ASCII', 'ignore').decode('utf-8')
     return s.strip().lower()
 
-def load_photo_a(csv_path: str) -> dict:
-    """Charge l'état actuel (Photo A) depuis le CSV Salesforce."""
-    photo_a = {}
-    if not os.path.exists(csv_path):
-        logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
-        return photo_a
+class SalesforceProvider:
+    def __init__(self, root_dir: str):
+        self.root_dir = root_dir
+        self.csv_files = [
+            "Fichier forgeron3 test mandat contrat.csv",
+            "Fichier forgeron3 test mandat prospect.csv"
+        ]
+
+    def _clean_header(self, header: str) -> str:
+        """Nettoie une clé d'en-tête CSV pour un accès déterministe."""
+        if not header:
+            return ""
+        # Enlèvement des accents
+        h = unicodedata.normalize('NFKD', str(header)).encode('ASCII', 'ignore').decode('utf-8')
+        # On ne garde que les lettres et chiffres
+        h = re.sub(r'[^a-zA-Z0-9]', '', h)
+        return h.lower()
+
+    def _find_key(self, keys: List[str], keywords: List[str]) -> str:
+        """Trouve la clé correspondante basée sur une liste de mots-clés."""
+        for k in keys:
+            if not k:
+                continue
+            for kw in keywords:
+                if kw in k:
+                    return k
+        return ""
+
+    async def get_photo_a(self) -> dict:
+        """Charge l'état actuel (Photo A) depuis les CSV Salesforce."""
+        # TODO (PROD): Remplacer la lecture CSV par un call API SOQL vers Salesforce
+        photo_a = {}
         
-    with open(csv_path, encoding='cp850', errors='replace') as f:
-        reader = csv.reader(f, delimiter=';')
-        try:
-            next(reader) # skip headers
-        except StopIteration:
-            return photo_a
-            
-        for row in reader:
-            if len(row) < 12:
+        for filename in self.csv_files:
+            csv_path = os.path.join(self.root_dir, filename)
+            if not os.path.exists(csv_path):
+                logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
                 continue
                 
-            ville = normalize_string(row[8])
-            elu_nom = normalize_string(row[10])
-            fonction = row[11].strip()
-            
-            key = f"{ville}---{elu_nom}"
-            photo_a[key] = {
-                "fonction": fonction,
-                "raw_nom": row[10],
-                "raw_ville": row[8]
-            }
-    return photo_a
+            with open(csv_path, encoding='cp850', errors='replace') as f:
+                reader_obj = csv.reader(f, delimiter=';')
+                try:
+                    headers = next(reader_obj)
+                except StopIteration:
+                    continue
+                    
+                cleaned_headers = [self._clean_header(h) for h in headers]
+                
+                # Ciblages basés sur les headers nettoyés
+                col_ville = self._find_key(cleaned_headers, ["ville", "commune"])
+                col_nom = self._find_key(cleaned_headers, ["elunom", "lunom", "nom", "elu"])
+                col_fonction = self._find_key(cleaned_headers, ["fonction", "fonctionelective"])
+                col_mandat = self._find_key(cleaned_headers, ["mandatname", "mandat"])
+                
+                reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
+                for row in reader:
+                    ville = row.get(col_ville, "") if col_ville else ""
+                    elu_nom = row.get(col_nom, "") if col_nom else ""
+                    fonction = row.get(col_fonction, "") if col_fonction else ""
+                    mandat_id = row.get(col_mandat, "") if col_mandat else ""
+                    
+                    if not ville or not elu_nom:
+                        continue
+                        
+                    v_norm = normalize_string(ville)
+                    elu_nom_norm = normalize_string(elu_nom)
+                    
+                    # Génération des deux clés : Ville---Nom Prenom et Ville---Prenom Nom
+                    # En inversant les mots, on couvre la permutation nom/prenom
+                    words = elu_nom_norm.split()
+                    elu_nom_reversed = " ".join(reversed(words))
+                    
+                    key_1 = f"{v_norm}---{elu_nom_norm}"
+                    key_2 = f"{v_norm}---{elu_nom_reversed}"
+                    
+                    val = {
+                        "fonction": fonction.strip(),
+                        "id_salesforce": mandat_id.strip(),
+                        "raw_nom": elu_nom.strip(),
+                        "raw_ville": ville.strip()
+                    }
+                    
+                    photo_a[key_1] = val
+                    photo_a[key_2] = val
+                    
+        return photo_a
 
-def get_villes_cp_map(csv_path: str) -> dict:
-    """Récupère le mapping Ville -> Code Postal depuis le CSV."""
-    vmap = {}
-    if not os.path.exists(csv_path):
+    async def get_villes_cp_map(self) -> dict:
+        """Récupère le mapping Ville -> Code Postal depuis l'ensemble des CSV."""
+        vmap = {}
+        for filename in self.csv_files:
+            csv_path = os.path.join(self.root_dir, filename)
+            if not os.path.exists(csv_path):
+                continue
+                
+            with open(csv_path, encoding='cp850', errors='replace') as f:
+                reader_obj = csv.reader(f, delimiter=';')
+                try:
+                    headers = next(reader_obj)
+                except StopIteration:
+                    continue
+                    
+                cleaned_headers = [self._clean_header(h) for h in headers]
+                col_ville = self._find_key(cleaned_headers, ["ville", "commune"])
+                col_cp = self._find_key(cleaned_headers, ["codepostal", "cp"])
+                
+                reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
+                for row in reader:
+                    v = row.get(col_ville, "").strip() if col_ville else ""
+                    cp = row.get(col_cp, "").strip() if col_cp else ""
+                    if v and cp:
+                        vmap[v] = cp
+                        
         return vmap
-        
-    with open(csv_path, encoding='cp850', errors='replace') as f:
-        reader = csv.reader(f, delimiter=';')
-        try:
-            next(reader)
-        except StopIteration:
-            pass
-        for row in reader:
-            if len(row) > 8:
-                v = row[8].strip()
-                cp = row[7].strip()
-                if v and cp:
-                    vmap[v] = cp
-    return vmap
 
 def get_strate_priorite(ville: str) -> str:
     """Déduit la taille de la commune (Strate) pour prioriser l'alerte."""
     v_norm = normalize_string(ville)
     grandes_villes = ["paris", "lyon", "marseille", "toulouse", "nice", "nantes", "montpellier", "strasbourg", "bordeaux", "lille", "rennes"]
     
-    # Heuristique basique : on identifie les villes majeures (> 100k hab)
     if any(gv in v_norm for gv in grandes_villes):
         return "1 - Plus de 100k hab"
         
@@ -134,7 +197,6 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         
         if found_a:
             statut_actuel = found_a["fonction"]
-            # Ex: si la fonction diffère
             if normalize_string(statut_actuel) != normalize_string(statut_trouve):
                 alerts.append({
                     "alerte_type": "MODIFICATION_FONCTION",
@@ -144,19 +206,11 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "statut_salesforce_actuel": statut_actuel,
                     "statut_trouve_web": statut_trouve,
                     "source_url_trouvee": m.source_url,
-                    "niveau_confiance": "HIGH"
+                    "niveau_confiance": "HIGH",
+                    "id_salesforce": found_a["id_salesforce"]
                 })
         else:
-            alerts.append({
-                "alerte_type": "NOUVEL_ELU_DETECTE",
-                "elu": nom_complet,
-                "commune": m.ville_ou_secteur,
-                "strate_priorite": strate,
-                "statut_salesforce_actuel": "Inconnu en base",
-                "statut_trouve_web": statut_trouve,
-                "source_url_trouvee": m.source_url,
-                "niveau_confiance": "MEDIUM"
-            })
+            logger.debug(f"Élu {nom_complet} ({m.ville_ou_secteur}) ignoré car absent de Salesforce (Photo A).")
             
     return alerts
 
@@ -176,7 +230,6 @@ async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict, ma
         url = found_url
         logger.info(f"URL découverte pour {ville}: {url}")
         
-        # Par défaut, si l'URL est découverte dynamiquement, on utilise le parser générique
         if not template or template == "":
             template = "generic_html_v1"
 
@@ -193,10 +246,8 @@ async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict, ma
 
     content_hash = parser.get_content_hash()
     
-    # Stratégie d'optimisation : Diffing
     if cache.get(url) == content_hash:
         logger.info(f"⏭️ Skip {ville} ({url}) : AUCUNE MODIFICATION MD5 DÉTECTÉE.")
-        # On passe, mais on traitera les mandats depuis l'extraction
         pass
         
     mandates = parser.normalize()
@@ -225,17 +276,17 @@ async def load_urls_from_db(db_path: str) -> List[Dict]:
 async def main():
     root_dir = os.path.dirname(os.path.dirname(__file__))
     db_path = os.path.join(root_dir, 'elus_sources.db')
-    csv_path = os.path.join(root_dir, 'Fichier forgeron3 test mandat contrat.csv')
     
     dispatcher_tasks = await load_urls_from_db(db_path)
     if not dispatcher_tasks:
         logger.warning("Aucune URL active à traiter. Fin du script.")
         return
 
-    # Chargement de la Photo A et mapping des CP
-    logger.info("Chargement du CSV Salesforce (Photo A)...")
-    photo_a = load_photo_a(csv_path)
-    map_cp = get_villes_cp_map(csv_path)
+    # Instanciation du provider et chargement de la Photo A et des CP
+    logger.info("Chargement des données Salesforce (Photo A)...")
+    provider = SalesforceProvider(root_dir)
+    photo_a = await provider.get_photo_a()
+    map_cp = await provider.get_villes_cp_map()
 
     cache = await DiffCacheManager.load()
     new_mandates: List[ElectedOfficialMandate] = []
