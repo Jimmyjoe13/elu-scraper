@@ -51,6 +51,7 @@ def normalize_string(s: str) -> str:
     """Normalise une chaîne (minuscule, sans accents) pour un matching robuste."""
     if not s:
         return ""
+    s = s.replace("-", " ")
     s = unicodedata.normalize('NFKD', str(s)).encode('ASCII', 'ignore').decode('utf-8')
     return s.strip().lower()
 
