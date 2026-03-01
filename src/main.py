@@ -7,6 +7,7 @@ import csv
 import unicodedata
 import re
 from typing import List, Dict
+from datetime import datetime
 
 from src.parsers.factory import ParserFactory
 from src.utils.cache import DiffCacheManager
@@ -88,6 +89,10 @@ class SalesforceProvider:
     async def get_photo_a(self) -> dict:
         """Charge l'état actuel (Photo A) depuis les CSV Salesforce."""
         # TODO (PROD): Remplacer la lecture CSV par un call API SOQL vers Salesforce
+        # SCHEMA DE REQUÊTE ATTENDU:
+        # SELECT Id, Name, Fonction__c, Parti__c, EPCI__c, Elu__r.Name, Mairie__r.Name
+        # FROM Mandat__c
+        # WHERE IsActive = TRUE
         photo_a = {}
         
         for filename in self.csv_files:
@@ -228,7 +233,8 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "niveau_confiance": "HIGH",
                     "mandat_name": list_a[0].get("mandat_name", ""),
                     "parti_politique": list_a[0].get("parti_politique", ""),
-                    "indicateur_epci": list_a[0].get("indicateur_epci", "")
+                    "indicateur_epci": list_a[0].get("indicateur_epci", ""),
+                    "date_detection": datetime.utcnow().isoformat() + "Z"
                 }
         else:
             logger.debug(f"Élu {nom_complet} ({m.ville_ou_secteur}) ignoré car absent de Salesforce (Photo A).")
@@ -334,6 +340,20 @@ async def main():
 
         # Validation métier : Photo A VS Photo B
         alerts = generate_validation_alerts(photo_a, new_mandates)
+
+        # Rapport Statistique d'Exécution ("Elite" POC)
+        photo_a_elus_valides = len(set(m["id_salesforce"] for mandats in photo_a.values() for m in mandats if m.get("id_salesforce")))
+        sites_scraped_succes = len(set(m.source_url for m in new_mandates))
+        taux_mutation = (len(alerts) / photo_a_elus_valides * 100) if photo_a_elus_valides > 0 else 0.0
+
+        logger.info("=========================================")
+        logger.info("   RAPPORT D'EXÉCUTION SYNTHÉTIQUE       ")
+        logger.info("=========================================")
+        logger.info(f"Élus chargés (Photo A) : {photo_a_elus_valides}")
+        logger.info(f"Sites scrapés avec succès : {sites_scraped_succes}")
+        logger.info(f"Alertes MODIFICATION_FONCTION : {len(alerts)}")
+        logger.info(f"Taux de mutation détecté : {taux_mutation:.2f}%")
+        logger.info("=========================================")
 
         # Bulk Upload des alertes vers l'interface de validation
         if alerts:
