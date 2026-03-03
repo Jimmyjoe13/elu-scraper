@@ -1,89 +1,407 @@
 import re
-from typing import List
+import logging
+import urllib.parse
+from typing import List, Optional, Tuple
+import aiohttp
 from bs4 import BeautifulSoup
 
 from ..base import BaseParser
 from ..factory import ParserFactory
 
+logger = logging.getLogger(__name__)
+
+# ───────────────────────────────────────────────────────────────────────
+# Constantes pour le Deep Fetch (découverte automatique de sous-pages)
+# ───────────────────────────────────────────────────────────────────────
+
+_DEEP_FETCH_KEYWORDS = ['elu', 'elus', 'equipe', 'conseil-municipal', 'conseil_municipal',
+                         'organigramme', 'trombinoscope', 'adjoints']
+
+_DEEP_FETCH_EXCLUSIONS = ['police', 'assainissement', 'salle', 'cimetiere',
+                           'urbanisme', 'jeunes', 'enfance', 'periscolaire']
+
+# ───────────────────────────────────────────────────────────────────────
+# Regex compilées pour l'extraction sémantique (agnostique au DOM)
+# ───────────────────────────────────────────────────────────────────────
+
+# Ancres sémantiques : mots-clés qui signalent la présence d'une fonction élective
+_ANCHOR_RE = re.compile(
+    r'\b(maire|adjoint|conseill)', re.IGNORECASE
+)
+
+# Suppression de _FUNC_RE rigide, remplacé par une méthode _extract_fonction agnostique et gloutonne.
+
+# Pattern 1 : Prénom NOM (NOM tout en majuscules, au moins 2 lettres)
+_UP = "A-ZÉÈÊËÀÂÎÏÔÙÛÜÇÑ"
+_LO = "a-zéèêëàâîïôùûüçñ"
+_NAME_PRENOM_NOM_RE = re.compile(
+    rf'(?:(?:M\.|Mme|M|Monsieur|Madame)\s+)?'
+    rf'([{_UP}][{_LO}]+(?:[\s-][{_UP}][{_LO}]+)*)'     # Prénom(s)
+    rf'\s+'
+    rf'([{_UP}]{{2,}}(?:[\s-][{_UP}]{{2,}})*)',           # NOM (2+ majuscules par mot)
+    re.UNICODE
+)
+
+# Pattern 2 : Prénom Nom (les deux en Title Case — sites qui ne mettent pas en majuscules)
+_NAME_TITLE_RE = re.compile(
+    rf'(?:(?:M\.|Mme|M|Monsieur|Madame)\s+)?'
+    rf'([{_UP}][{_LO}]+(?:[\s-][{_UP}][{_LO}]+)*)'    # Prénom(s)
+    rf'\s+'
+    rf'([{_UP}][{_LO}]+(?:[\s-][{_UP}][{_LO}]+)*)',    # Nom (Title Case)
+    re.UNICODE
+)
+
+# Anti faux-positifs : mots qui ressemblent à des noms mais n'en sont pas
+_NAME_BLACKLIST = frozenset({
+    "MAIRE", "ADJOINT", "ADJOINTE", "CONSEILLER", "CONSEILLERE", "MUNICIPAL",
+    "MUNICIPALE", "VILLE", "COMMUNE", "MAIRIE", "DELEGUE", "DELEGUEE",
+    "BUDGET", "MARCHES", "PUBLICS", "INTERCOMMUNALITE", "RECRUTEMENT",
+    "DELIBERATIONS", "NOUVELLE", "CONSEIL", "NOUVELLE", "ACCUEIL",
+    "URBANISME", "PATRIMOINE", "CULTURE", "EDUCATION", "JEUNESSE",
+    "ENFANCE", "SPORTS", "SECURITE", "SERVICES", "COMMUNICATION",
+    "HOTEL", "CEDEX", "PARIS", "FRANCE", "MONSIEUR", "MADAME",
+    "TYPE", "MANDAT", "DELEGATION", "ARRONDISSEMENT", "SECTEUR",
+    "CONTACT", "INFOS", "PRATIQUES", "MENU", "ACCÈS", "RAPIDE",
+})
+
+# Taille minimale d'un bloc de texte pertinent (filtre les menus de navigation)
+_MIN_BLOCK_LENGTH = 10
+
+
 @ParserFactory.register("generic_html_v1")
 class GenericHtmlV1Parser(BaseParser):
     """
-    Parser générique performant basé sur des heuristiques regex sans connaitre
-    la structure HTML exacte du site cible (pour la scalabilité).
+    Parser générique 100% agnostique au DOM.
+    
+    Fonctionne comme un scanner optique basé sur la sémantique et les regex,
+    sans aucune dépendance à la structure HTML du site cible.
+    
+    Architecture :
+    1. Deep Fetch : si la page racine est vide, suit automatiquement les liens internes
+    2. Fragmentation DOM : découpe le HTML en blocs de texte (<tr>, <li>, <div>, <p>)
+    3. Ancre sémantique : chaque bloc est scanné pour les mots-clés (maire, adjoint, conseiller)
+    4. Capture regex : extraction du nom et de la fonction par pattern matching multi-stratégie
+    5. Appariement par proximité : si le nom n'est pas dans le même bloc, scan des voisins
     """
 
+    # ─── Deep Fetch (inchangé) ────────────────────────────────────────
+
+    async def fetch(self, session: aiohttp.ClientSession) -> Optional[str]:
+        """Surcharge de fetch avec Deep Fetch récursif à 2 niveaux."""
+        html = await super().fetch(session)
+        if not html:
+            return None
+        
+        # 1. Vérification de la page racine
+        test_results = self._extract_from_html(html)
+        if test_results:
+            logger.info(f"✅ Deep Fetch inutile pour {self.url} : {len(test_results)} élus trouvés sur la racine.")
+            return html
+        
+        logger.info(f"🔍 Deep Fetch NIVEAU 1 activé pour {self.url}...")
+        
+        # 2. Découverte des liens candidats sur la racine
+        candidates_lvl1 = self._discover_elus_urls(html)
+        
+        for url_lvl1 in candidates_lvl1[:3]:  # On teste max 3 liens prioritaires
+            logger.info(f"  → Test L1: {url_lvl1}")
+            try:
+                async with session.get(url_lvl1, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        html_lvl1 = await response.text()
+                        
+                        # Test d'extraction sur L1
+                        if self._extract_from_html(html_lvl1):
+                            logger.info(f"✅ Succès Deep Fetch L1 : {url_lvl1}")
+                            self.html_content = html_lvl1
+                            self.url = url_lvl1
+                            return html_lvl1
+                        
+                        # Échec sur L1, on fouille cette sous-page (Niveau 2)
+                        candidates_lvl2 = self._discover_elus_urls(html_lvl1)
+                        for url_lvl2 in candidates_lvl2[:2]: # Max 2 sous-liens pour éviter l'explosion
+                            # Ne pas boucler à l'infini
+                            if url_lvl2 in candidates_lvl1 or url_lvl2 == self.url:
+                                continue
+                                
+                            logger.info(f"    → Test L2: {url_lvl2}")
+                            async with session.get(url_lvl2, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as res_lvl2:
+                                if res_lvl2.status == 200:
+                                    html_lvl2 = await res_lvl2.text()
+                                    if self._extract_from_html(html_lvl2):
+                                        logger.info(f"✅ Succès Deep Fetch L2 : {url_lvl2}")
+                                        self.html_content = html_lvl2
+                                        self.url = url_lvl2
+                                        return html_lvl2
+
+            except Exception as e:
+                logger.warning(f"❌ Erreur sur {url_lvl1}: {e}")
+        
+        # Si rien ne marche, on garde la page racine par défaut
+        logger.warning(f"⚠️ Échec du Deep Fetch, retour à la page racine pour {self.url}")
+        return html
+    
+    def _discover_elus_urls(self, html: str) -> List[str]:
+        """Scanne les liens <a> et retourne une liste triée par pertinence."""
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        candidates = set()
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag.get('href', '').strip()
+            text = a_tag.get_text(strip=True)
+            
+            if not href or href.startswith('#') or href.startswith('mailto:') or href.startswith('tel:'):
+                continue
+            
+            combined = (href + ' ' + text).lower()
+            
+            has_keyword = any(kw in combined for kw in _DEEP_FETCH_KEYWORDS)
+            has_exclusion = any(excl in combined for excl in _DEEP_FETCH_EXCLUSIONS)
+            
+            if has_keyword and not has_exclusion:
+                full_url = self._resolve_url(href)
+                if full_url and full_url.rstrip('/') != self.url.rstrip('/'):
+                    candidates.add((full_url, combined))
+        
+        # Fonction de tri pour donner la priorité aux URL/textes contenant "elu"
+        def score_link(item):
+            url, text = item
+            score = 0
+            if 'elu' in text or 'élu' in text: score += 10
+            if 'equipe' in text or 'équipe' in text: score += 5
+            return -score # Négatif pour tri décroissant
+            
+        ranked_urls = [url for url, _ in sorted(list(candidates), key=score_link)]
+        return ranked_urls
+
+    
+    def _resolve_url(self, href: str) -> Optional[str]:
+        """Convertit un href relatif ou absolu en URL complète."""
+        if href.startswith('http'):
+            return href
+        parsed_base = urllib.parse.urlparse(self.url)
+        base = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        if href.startswith('/'):
+            return base + href
+        base_path = parsed_base.path.rstrip('/')
+        return base + base_path + '/' + href
+
+    # ─── Extraction (point d'entrée) ──────────────────────────────────
+
     def extract(self) -> List[dict]:
-        if not self.html_content:
+        """Point d'entrée standard appelé par BaseParser.normalize()."""
+        return self._extract_from_html(self.html_content)
+
+    # ─── Moteur d'extraction agnostique ───────────────────────────────
+
+    def _extract_from_html(self, html: str) -> List[dict]:
+        """Extraction 100% agnostique au DOM par scan sémantique.
+        
+        Trois stratégies complémentaires exécutées en cascade :
+        1. Scan des conteneurs structurels (tr, li, div.item, article)
+        2. Scan des blocs de texte individuels (p, div, span, td, h1-h6)
+        3. Appariement par proximité (fonction dans un bloc, nom dans le voisin)
+        """
+        if not html:
             return []
 
-        soup = BeautifulSoup(self.html_content, 'html.parser')
-        results = []
+        soup = BeautifulSoup(html, 'html.parser')
         
-        # 1. Nettoyage du bruit HTML
-        for el in soup(["script", "style", "nav", "footer", "iframe", "noscript", "svg"]):
+        # Nettoyage du bruit HTML (inclut nav/footer/header pour éviter les faux positifs des menus)
+        for el in soup(["script", "style", "nav", "footer", "header", "menu", "aside", "iframe", "noscript", "svg"]):
             el.extract()
-            
-        # 2. Heuristiques par Expressions Régulières
-        # Recherche de fonctions typiques
-        func_keywords = r'(Maire(?:\s+délégué(?:e)?)?|Adjoint(?:e)?(?:\s+au\s+maire)?|Conseiller(?:ère)?(?:\s+municipal(?:e)?)?)'
-        func_pattern = re.compile(func_keywords, re.IGNORECASE)
         
-        # Recherche d'un Prénom Nom (Optionnel: Civilité) - Basé sur la convention Française: Prénom NOM
-        upper_chars = "A-ZÉÈÊËÀÂÎÏÔÙÛÜÇ"
-        lower_chars = "a-zéèêëàâîïôùûüç"
-        
-        # Ex: Jean-Marc DUPONT, ou Marie JOUBERT-LAURENT
-        name_pattern = re.compile(
-            rf'(?:(?:M\.|Mme|M|Monsieur|Madame)\s+)?([{upper_chars}][{lower_chars}-]+(?:\s+[{upper_chars}][{lower_chars}-]+)*)\s+([{upper_chars}-]{{2,}}(?:\s+[{upper_chars}-]{{2,}})*)'
-        )
-
+        results = []
         seen = set()
-
-        # 3. Parcours du DOM pour trouver les couples (Nom/Prénom + Fonction)
-        # On itère sur tous les blocs de texte raisonnables (< 300 caractères)
-        tags_to_check = soup.body.descendants if soup.body else soup.descendants
         
-        for tag in tags_to_check:
-            if not tag.name or tag.name in ["html", "body", "head"]:
+        # ── Stratégie 1 : Conteneurs structurels ──
+        # Les élus sont souvent dans des <tr>, <li>, ou des <div> avec une classe
+        containers = soup.select('tr, li, [class*="item"], [class*="elu"], [class*="member"], '
+                                  '[class*="person"], [class*="team"], article')
+        
+        for container in containers:
+            try:
+                text = self._clean_text(container.get_text(separator=' ', strip=True))
+                if not text or len(text) < _MIN_BLOCK_LENGTH or len(text) > 500 or not _ANCHOR_RE.search(text):
+                    continue
+                
+                pairs = self._extract_pairs_from_text(text)
+                for prenom, nom, fonction in pairs:
+                    self._add_result(results, seen, prenom, nom, fonction)
+            except Exception:
                 continue
-                
-            text = tag.get_text(separator=' ', strip=True)
-            if not text or len(text) > 300: 
-                continue
-                
-            func_match = func_pattern.search(text)
-            if func_match:
-                func = func_match.group(1).strip()
-                
-                # Cherche le nom dans la MÊME balise
-                name_match = name_pattern.search(text)
-                
-                # S'il n'y est pas, heuristique 2: regarde le parent direct (s'il n'est pas trop grand)
-                if not name_match and tag.parent:
-                    parent_text = tag.parent.get_text(separator=' ', strip=True)
-                    if len(parent_text) < 400:
-                        name_match = name_pattern.search(parent_text)
-                        
-                # S'il n'y est toujours pas, heuristique 3: regarde la balise soeur (ex: <tr><td>Nom</td><td>Fonction</td></tr>)
-                if not name_match:
-                    next_sib = tag.find_next_sibling()
-                    if next_sib:
-                        sib_text = next_sib.get_text(separator=' ', strip=True)
-                        name_match = name_pattern.search(sib_text)
-                        
-                if name_match:
-                    prenom = name_match.group(1).strip()
-                    nom = name_match.group(2).strip()
+        
+        # ── Stratégie 2 : Blocs de texte individuels ──
+        # Parcours général du DOM pour les structures non couvertes par la stratégie 1
+        if soup.body:
+            for tag in soup.body.descendants:
+                try:
+                    if not tag.name or tag.name in ["html", "body", "head"]:
+                        continue
                     
-                    # Filtres anti faux-positifs
-                    if nom.upper() not in ["MAIRE", "ADJOINT", "CONSEILLER", "MUNICIPAL", "VILLE"]:
-                        unique_key = f"{prenom.lower()}-{nom.lower()}-{func.lower()}"
-                        if unique_key not in seen:
-                            seen.add(unique_key)
-                            results.append({
-                                "nom": nom.strip(),
-                                "prenom": prenom.strip(),
-                                "fonction": func.strip()
-                            })
-                            
+                    text = self._clean_text(tag.get_text(separator=' ', strip=True))
+                    if not text or len(text) < _MIN_BLOCK_LENGTH or len(text) > 500 or not _ANCHOR_RE.search(text):
+                        continue
+                    
+                    pairs = self._extract_pairs_from_text(text)
+                    for prenom, nom, fonction in pairs:
+                        self._add_result(results, seen, prenom, nom, fonction)
+                    
+                    # Si on a trouvé une fonction mais pas de nom, on cherche dans les voisins
+                    if not pairs:
+                        fonction = self._extract_fonction(text)
+                        if fonction:
+                            name = self._search_name_in_neighbors(tag)
+                            if name:
+                                prenom, nom = name
+                                self._add_result(results, seen, prenom, nom, fonction)
+                except Exception:
+                    continue
+        
         return results
+
+    def _extract_pairs_from_text(self, text: str) -> List[Tuple[str, str, str]]:
+        """Extrait les couples (nom, fonction) de manière infaillible (Proof of Fail)."""
+        pairs = []
+        
+        fonction = self._extract_fonction(text)
+        if not fonction:
+            return pairs
+        
+        names = self._extract_names(text)
+        
+        if names:
+            for prenom, nom in names:
+                pairs.append((prenom, nom, fonction))
+        else:
+            # Fallback Ultime : si aucune Regex de nom n'a marché, on garde TOUT le bloc.
+            # La donnée ne sera jamais perdue, le main.py s'en occupera!
+            pairs.append(("", text.strip()[:100], fonction))
+        
+        return pairs
+    
+    def _extract_fonction(self, text: str) -> Optional[str]:
+        """Extrait la fonction sans la tronquer (Priorité Absolue)."""
+        # Si le bloc est relativement court, on prend tout (meilleur contexte)
+        if len(text) <= 150:
+            return text.strip()
+            
+        # Sinon, pour les très gros paragraphes, on capture 30 chars avant et 80 après l'ancre
+        pattern = re.compile(
+            r'(.{0,30}\b(?:maire|adjoint|conseill)\w*.{0,80})',
+            re.IGNORECASE
+        )
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
+        
+        return None
+    
+    def _extract_names(self, text: str) -> List[Tuple[str, str]]:
+        """Extrait les noms avec une tolérance maximale."""
+        names = []
+        
+        # Stratégie 1 : Prénom NOM (majuscules)
+        for match in _NAME_PRENOM_NOM_RE.finditer(text):
+            prenom = match.group(1).strip()
+            nom = match.group(2).strip()
+            if self._is_valid_name(prenom, nom):
+                names.append((prenom, nom))
+        
+        if names:
+            return names
+        
+        # Stratégie 2 : Prénom Nom (Title Case)
+        # BUGFIX: Ne plus tester si ça chevauche `_FUNC_RE` car ça faisait crasher le parseur!
+        for match in _NAME_TITLE_RE.finditer(text):
+            prenom = match.group(1).strip()
+            nom = match.group(2).strip()
+            if self._is_valid_name(prenom, nom):
+                names.append((prenom, nom))
+        
+        if names:
+            return names
+            
+        # Stratégie 3 : Suite de majuscules brutes (ex: "DUPONT JEAN")
+        caps = re.findall(rf'\b([{_UP}]{{3,}}(?:[\s-][{_UP}]{{3,}})*)\b', text, re.UNICODE)
+        for c in caps:
+            if c not in _NAME_BLACKLIST:
+                names.append(("", c.strip()))
+        
+        return names
+    
+    def _is_valid_name(self, prenom: str, nom: str) -> bool:
+        """Vérifie qu'un nom n'est pas un mot du dictionnaire ou de navigation."""
+        if not nom or len(nom) < 2:
+            return False
+            
+        # Si un prénom est fourni, on le limite (évite de matcher des phrases entières)
+        if prenom:
+            if len(prenom) > 30 or len(prenom.split()) > 3:
+                return False
+        
+        if len(nom) > 60:
+            return False
+        
+        if prenom and prenom.upper() in _NAME_BLACKLIST:
+            return False
+        if nom.upper() in _NAME_BLACKLIST:
+            return False
+        
+        nom_lower = nom.lower()
+        if any(kw in nom_lower for kw in ['maire', 'adjoint', 'conseill', 'municipal', 'delegue']):
+            return False
+        
+        return True
+    
+    def _search_name_in_neighbors(self, tag) -> Optional[Tuple[str, str]]:
+        """Cherche un nom dans les éléments DOM voisins (frères et parent)."""
+        # Frère précédent
+        prev = tag.find_previous_sibling()
+        if prev:
+            text = self._clean_text(prev.get_text(separator=' ', strip=True))
+            if text and len(text) < 200:
+                names = self._extract_names(text)
+                if names:
+                    return names[0]
+        
+        # Frère suivant
+        next_sib = tag.find_next_sibling()
+        if next_sib:
+            text = self._clean_text(next_sib.get_text(separator=' ', strip=True))
+            if text and len(text) < 200:
+                names = self._extract_names(text)
+                if names:
+                    return names[0]
+        
+        # Parent direct (si compact)
+        if tag.parent:
+            text = self._clean_text(tag.parent.get_text(separator=' ', strip=True))
+            if text and len(text) < 400:
+                names = self._extract_names(text)
+                if names:
+                    return names[0]
+        
+        return None
+    
+    def _add_result(self, results: list, seen: set, prenom: str, nom: str, fonction: str):
+        """Ajoute un résultat dédoublonné."""
+        unique_key = f"{prenom.lower()}-{nom.lower()}-{fonction.lower()}"
+        if unique_key not in seen:
+            seen.add(unique_key)
+            results.append({
+                "nom": nom.strip(),
+                "prenom": prenom.strip(),
+                "fonction": fonction.strip()
+            })
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Nettoyage agressif du bruit textuel."""
+        if not text:
+            return ""
+        # Remplacement des retours à la ligne et tabulations par des espaces
+        text = re.sub(r'[\n\r\t]+', ' ', text)
+        # Collapse des espaces multiples
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()

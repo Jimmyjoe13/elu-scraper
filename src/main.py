@@ -56,6 +56,85 @@ def normalize_string(s: str) -> str:
     s = unicodedata.normalize('NFKD', str(s)).encode('ASCII', 'ignore').decode('utf-8')
     return s.strip().lower()
 
+def normalize_ville(s: str) -> str:
+    """Normalise un nom de ville en retirant les suffixes postaux français.
+    
+    Exemples:
+        'LYON CEDEX 1'      -> 'lyon'
+        'MARSEILLE CEDEX 20' -> 'marseille'
+        'PARIS RP'          -> 'paris'
+        'Paris'             -> 'paris'
+    """
+    if not s:
+        return ""
+    v = normalize_string(s)
+    # Suppression des suffixes postaux français courants
+    v = re.sub(r'\s+(cedex\s*\d*|rp|sp|cx\s*\d*|ptt)$', '', v).strip()
+    return v
+
+def normalize_fonction(s: str) -> str:
+    """Normalise une fonction élective en sa racine sémantique canonique.
+    
+    Réduit les variantes de formulation à 4 rôles canoniques pour éliminer
+    les faux positifs tout en détectant les vraies mutations de poste.
+    
+    Règles métier :
+        - 'Adjoint au Maire de Marseille en charge de...' → 'adjoint'
+        - 'Adjointe à la Maire'                          → 'adjoint'
+        - '1er Adjoint'                                  → 'adjoint'
+        - 'Conseiller de Paris'                          → 'conseiller'
+        - 'Conseiller municipal'                         → 'conseiller'
+        - 'Conseiller d'arrondissement'                  → 'conseiller'
+        - 'Conseillère municipale déléguée'              → 'conseiller'
+        - 'Maire d'arrondissement'                       → 'maire_arrondissement'
+        - 'Maire de secteur'                             → 'maire_arrondissement'
+        - 'Maire' / 'la Maire' / 'le Maire'             → 'maire'
+    """
+    if not s:
+        return ""
+    f = normalize_string(s)
+    
+    # Nettoyage du bruit : ordinaux en début de chaîne ("1er", "2ème", "3e", etc.)
+    f = re.sub(r'^\d+(?:er|ere|eme|e|ieme)\s+', '', f).strip()
+    # Nettoyage des articles de début ("le ", "la ", "l'")
+    f = re.sub(r'^(?:le|la|l)\s+', '', f).strip()
+    
+    # ORDRE CRITIQUE : Adjoint AVANT Maire (car "Adjoint au Maire" contient les deux)
+    if re.search(r'\badjoint', f):
+        return "adjoint"
+    
+    # Maire d'arrondissement / de secteur (AVANT maire simple)
+    if re.search(r'\bmaire\b.*(?:arrondissement|secteur)', f):
+        return "maire_arrondissement"
+    
+    # Maire (simple)
+    if re.search(r'\bmaire\b', f):
+        return "maire"
+    
+    # Conseiller(ère) — toutes variantes (municipal, de Paris, d'arrondissement, délégué)
+    if re.search(r'\bconseill', f):
+        return "conseiller"
+    
+    # Aucune racine connue : retourner la chaîne normalisée telle quelle
+    # (pour les rôles atypiques comme "Président", "Secrétaire", etc.)
+    return f
+
+# Matrice de suprématie des mandats : poids hiérarchique par rôle canonique
+_FONCTION_WEIGHTS = {
+    "maire": 4,
+    "adjoint": 3,
+    "maire_arrondissement": 2,
+    "conseiller": 1,
+}
+
+def get_fonction_weight(canonical: str) -> int:
+    """Retourne le poids hiérarchique d'une fonction canonique.
+    
+    Maire (4) > Adjoint (3) > Maire d'arrondissement (2) > Conseiller (1).
+    Les rôles inconnus retournent 0 (toujours alerter par sécurité).
+    """
+    return _FONCTION_WEIGHTS.get(canonical, 0)
+
 class SalesforceProvider:
     def __init__(self, root_dir: str):
         self.root_dir = root_dir
@@ -128,7 +207,7 @@ class SalesforceProvider:
                     if not ville or not elu_nom:
                         continue
                         
-                    v_norm = normalize_string(ville)
+                    v_norm = normalize_ville(ville)
                     elu_nom_norm = normalize_string(elu_nom)
                     
                     # Génération des deux clés : Ville---Nom Prenom et Ville---Prenom Nom
@@ -204,7 +283,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         nom_complet = f"{m.prenom} {m.nom}"
         nom_complet_norm = normalize_string(nom_complet)
         nom_reverse_norm = normalize_string(f"{m.nom} {m.prenom}")
-        ville_norm = normalize_string(m.ville_ou_secteur)
+        ville_norm = normalize_ville(m.ville_ou_secteur)
         
         statut_trouve = m.fonction
         strate = get_strate_priorite(m.ville_ou_secteur)
@@ -213,11 +292,25 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
         list_a = photo_a.get(f"{ville_norm}---{nom_complet_norm}") or photo_a.get(f"{ville_norm}---{nom_reverse_norm}") or []
         
         if list_a:
-            # Est-ce que le statut trouvé sur le web existe parmi les mandats SF de cet élu ?
-            statut_trouve_norm = normalize_string(statut_trouve)
-            match_found = any(normalize_string(a["fonction"]) == statut_trouve_norm for a in list_a)
+            # Comparaison sémantique : on compare les RACINES canoniques (adjoint, maire, conseiller)
+            # et non les chaînes brutes, pour éliminer les faux positifs de formulation
+            statut_trouve_canon = normalize_fonction(statut_trouve)
+            match_found = any(normalize_fonction(a["fonction"]) == statut_trouve_canon for a in list_a)
             
             if not match_found:
+                # ── Matrice de suprématie : filtrer les fausses rétrogradations ──
+                # Un Maire apparaît souvent comme Conseiller sur des pages secondaires.
+                # Si le poids SF est SUPÉRIEUR au poids Web, c'est du bruit structurel.
+                poids_web = get_fonction_weight(statut_trouve_canon)
+                poids_sf_max = max(get_fonction_weight(normalize_fonction(a["fonction"])) for a in list_a)
+                
+                if poids_sf_max > poids_web and poids_web > 0:
+                    logger.debug(
+                        f"⏭️ Fausse rétrogradation ignorée pour {nom_complet} ({m.ville_ou_secteur}): "
+                        f"SF={poids_sf_max} > Web={poids_web} ('{statut_trouve}')"
+                    )
+                    continue
+                
                 # On prend le premier ID Salesforce par défaut ou le mandat 'principal' s'il y a une logique
                 sf_id = list_a[0]["id_salesforce"]
                 statuts_actuels = " | ".join([a["fonction"] for a in list_a])
@@ -237,7 +330,13 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "date_detection": datetime.utcnow().isoformat() + "Z"
                 }
         else:
-            logger.debug(f"Élu {nom_complet} ({m.ville_ou_secteur}) ignoré car absent de Salesforce (Photo A).")
+            key_tried = f"{ville_norm}---{nom_complet_norm}"
+            nb_keys_ville = sum(1 for k in photo_a if k.startswith(ville_norm + "---"))
+            logger.debug(
+                f"Élu {nom_complet} ({m.ville_ou_secteur}) absent de Photo A. "
+                f"Clé cherchée: '{key_tried}'. "
+                f"Clés Photo A pour '{ville_norm}': {nb_keys_ville}"
+            )
             
     return list(alerts_dict.values())
 
@@ -274,8 +373,9 @@ async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict, ma
     content_hash = parser.get_content_hash()
     
     if cache.get(url) == content_hash:
-        logger.info(f"⏭️ Skip {ville} ({url}) : AUCUNE MODIFICATION MD5 DÉTECTÉE.")
-        pass
+        logger.info(f"ℹ️ Contenu identique pour {ville} ({url}), parsing quand même (mode POC).")
+        # TODO (PROD): Décommenter le return ci-dessous pour activer le vrai skip en production
+        # return ville, []
         
     mandates = parser.normalize()
     if mandates:
