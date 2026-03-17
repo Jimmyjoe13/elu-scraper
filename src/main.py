@@ -137,11 +137,43 @@ def get_fonction_weight(canonical: str) -> int:
     """
     return _FONCTION_WEIGHTS.get(canonical, 0)
 
+def _normalize_type_mandat(raw: str) -> str:
+    """Normalise le type de mandat Salesforce en valeur canonique.
+    
+    >>> _normalize_type_mandat("MANDAT CONTRAT")
+    'CONTRAT'
+    >>> _normalize_type_mandat("MANDAT PROSPECT")
+    'PROSPECT'
+    """
+    r = raw.strip().upper()
+    if "CONTRAT" in r:
+        return "CONTRAT"
+    if "PROSPECT" in r:
+        return "PROSPECT"
+    return "INCONNU"
+
+def _normalize_etat_contrat(raw: str) -> str:
+    """Normalise l'état du contrat Salesforce en valeur canonique.
+    
+    >>> _normalize_etat_contrat("En cours")
+    'en_cours'
+    >>> _normalize_etat_contrat("Résilié")
+    'resilie'
+    """
+    r = normalize_string(raw)  # utilise la fonction normalize_string() déjà existante
+    if "resil" in r:
+        return "resilie"
+    if "liquid" in r:
+        return "liquide"
+    if "cours" in r or "actif" in r or "en cours" in r:
+        return "en_cours"
+    return "inconnu"
+
 class SalesforceProvider:
     def __init__(self, root_dir: str):
         self.root_dir = root_dir
         self.csv_files = [
-            "forgeron3_rne_mandat_contrat.csv"
+            "report1773758799231.csv"
         ]
 
     def _clean_header(self, header: str) -> str:
@@ -189,21 +221,33 @@ class SalesforceProvider:
                     continue
                     
                 cleaned_headers = [self._clean_header(h) for h in headers]
+                logger.debug(f"Headers nettoyés détectés : {cleaned_headers}")
                 
-                # Ciblages basés sur les headers nettoyés
-                col_ville = self._find_key(cleaned_headers, ["ville"])
-                col_nom = self._find_key(cleaned_headers, ["elunom", "lunom"])
-                col_fonction = self._find_key(cleaned_headers, ["fonctionelective", "fonction"])
-                col_mandat = self._find_key(cleaned_headers, ["mandatmandatname", "mandatname", "mandat"])
-                col_parti = self._find_key(cleaned_headers, ["partipolitique", "parti", "etiquette"])
-                col_epci = self._find_key(cleaned_headers, ["epci", "intercommunalite"])
+                # Ciblage robuste par index direct
+                # Ville (9), Elu:Nom (11), Fonction (12), Mandat (19), Type (20), Etat (21)
+                col_ville = cleaned_headers[9] if len(cleaned_headers) > 9 else None
+                col_nom = cleaned_headers[11] if len(cleaned_headers) > 11 else None
+                col_fonction = cleaned_headers[12] if len(cleaned_headers) > 12 else None
+                col_mandat = cleaned_headers[19] if len(cleaned_headers) > 19 else None
+                col_type_mandat = cleaned_headers[20] if len(cleaned_headers) > 20 else None
+                col_etat_contrat = cleaned_headers[21] if len(cleaned_headers) > 21 else None
+                
+                # Fallback pour les colonnes optionnelles
+                col_parti = "partipolitique" if "partipolitique" in cleaned_headers else None
+                col_epci = "epci" if "epci" in cleaned_headers else None
+
+                logger.debug(f"Mapping colonnes → ville:{col_ville}, nom:{col_nom}, fonction:{col_fonction}, mandat:{col_mandat}")
+
+                if not col_ville or not col_nom:
+                    logger.error(f"Colonnes critiques introuvables dans {csv_path}. Headers: {cleaned_headers}")
+                    continue
                 
                 reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
                 for row in reader:
-                    ville = row.get(col_ville, "") if col_ville else ""
-                    elu_nom = row.get(col_nom, "") if col_nom else ""
-                    fonction = row.get(col_fonction, "") if col_fonction else ""
-                    mandat_id = row.get(col_mandat, "") if col_mandat else ""
+                    ville = row.get(col_ville, "")
+                    elu_nom = row.get(col_nom, "")
+                    fonction = row.get(col_fonction, "")
+                    mandat_id = row.get(col_mandat, "")
                     
                     if not ville or not elu_nom:
                         continue
@@ -226,7 +270,10 @@ class SalesforceProvider:
                         "raw_ville": ville.strip(),
                         "mandat_name": row.get(col_mandat, "").strip() if col_mandat else "",
                         "parti_politique": row.get(col_parti, "").strip() if col_parti else "",
-                        "indicateur_epci": row.get(col_epci, "").strip() if col_epci else ""
+                        "indicateur_epci": row.get(col_epci, "").strip() if col_epci else "",
+                        # NOUVEAUX CHAMPS :
+                        "type_mandat": _normalize_type_mandat(row.get(col_type_mandat, "")),
+                        "etat_contrat": _normalize_etat_contrat(row.get(col_etat_contrat, ""))
                     }
                     
                     # On initialise avec une liste si la clé n'existe pas
@@ -352,6 +399,9 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "mandat_name": list_a[0].get("mandat_name", ""),
                     "parti_politique": list_a[0].get("parti_politique", ""),
                     "indicateur_epci": list_a[0].get("indicateur_epci", ""),
+                    # NOUVEAUX CHAMPS GAP 2 :
+                    "type_mandat": list_a[0].get("type_mandat", "INCONNU"),
+                    "etat_contrat": list_a[0].get("etat_contrat", "inconnu"),
                     "date_detection": datetime.utcnow().isoformat() + "Z"
                 }
         else:
