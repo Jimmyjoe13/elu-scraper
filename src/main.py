@@ -6,6 +6,7 @@ import aiosqlite
 import csv
 import unicodedata
 import re
+import uuid
 from typing import List, Dict
 from datetime import datetime
 
@@ -139,8 +140,7 @@ class SalesforceProvider:
     def __init__(self, root_dir: str):
         self.root_dir = root_dir
         self.csv_files = [
-            "Fichier forgeron3 test mandat contrat.csv",
-            "Fichier forgeron3 test mandat prospect.csv"
+            "forgeron3_rne_mandat_contrat.csv"
         ]
 
     def _clean_header(self, header: str) -> str:
@@ -180,7 +180,7 @@ class SalesforceProvider:
                 logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
                 continue
                 
-            with open(csv_path, encoding='cp850', errors='replace') as f:
+            with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
@@ -245,7 +245,7 @@ class SalesforceProvider:
             if not os.path.exists(csv_path):
                 continue
                 
-            with open(csv_path, encoding='cp850', errors='replace') as f:
+            with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
@@ -400,7 +400,7 @@ async def load_urls_from_db(db_path: str) -> List[Dict]:
                 })
     return urls
 
-async def main():
+async def _execute_main(run_id: str):
     root_dir = os.path.dirname(os.path.dirname(__file__))
     db_path = os.path.join(root_dir, 'elus_sources.db')
     
@@ -441,6 +441,9 @@ async def main():
         # Validation métier : Photo A VS Photo B
         alerts = generate_validation_alerts(photo_a, new_mandates)
 
+        for alert in alerts:
+            alert["run_id"] = run_id
+
         # Rapport Statistique d'Exécution ("Elite" POC)
         photo_a_elus_valides = len(set(m["id_salesforce"] for mandats in photo_a.values() for m in mandats if m.get("id_salesforce")))
         sites_scraped_succes = len(set(m.source_url for m in new_mandates))
@@ -462,6 +465,22 @@ async def main():
             await DiffCacheManager.save(cache)
         else:
             logger.info("Fin du script. Aucun changement détecté entre Salesforce et le Web.")
+
+_job_running = False
+
+async def main():
+    global _job_running
+    if _job_running:
+        logger.warning("Job déjà en cours, exécution ignorée.")
+        return
+        
+    _job_running = True
+    try:
+        run_id = str(uuid.uuid4())
+        logger.info(f"Démarrage d'un nouveau job (run_id: {run_id})")
+        await _execute_main(run_id)
+    finally:
+        _job_running = False
 
 if __name__ == "__main__":
     asyncio.run(main())

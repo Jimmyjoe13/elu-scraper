@@ -12,7 +12,7 @@ env/
 
 # === Données Métier & Salesforce (Confidentialité) ===
 # Ne surtout pas commiter les exports Salesforce !
-
+*.csv
 *mandat*.csv
 *forgeron3*.csv
 
@@ -43,3 +43,4 @@ rne_data.db
 .vscode/
 .idea/
 Thumbs.db
+*.txt
