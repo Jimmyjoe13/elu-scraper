@@ -20,6 +20,7 @@ import src.parsers.plugins.paris_lutece_v1
 import src.parsers.plugins.lyon_drupal_v1
 import src.parsers.plugins.marseille_html_v1
 import src.parsers.plugins.generic_html_v1
+import src.parsers.plugins.auto_agent_v1
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -275,6 +276,30 @@ def get_strate_priorite(ville: str) -> str:
         
     return "Non définie"
 
+def clean_statut_web(statut_raw: str, elu_name: str) -> str:
+    """Nettoie le statut web en supprimant le préfixe de nom (Prénom NOM, NOM Prénom, etc) si présent."""
+    if not statut_raw or not elu_name:
+        return statut_raw
+        
+    variants = [elu_name]
+    parts = elu_name.split()
+    if len(parts) >= 2:
+        # Variante: NOM Prénom
+        variants.append(f"{' '.join(parts[1:])} {parts[0]}")
+        # Variante bonus pour pallier aux prénoms multiples et au format nom de famille simple
+        if len(parts) > 2:
+            variants.append(f"{parts[-1]} {' '.join(parts[:-1])}")
+            
+    for variant in variants:
+        # Pattern insensible à la casse détectant le nom en début de chaîne suivi d'éventuels séparateurs (tiret, virgule, etc)
+        pattern = r'^\s*' + re.escape(variant) + r'[\s,:\-]*'
+        new_statut = re.sub(pattern, '', statut_raw, flags=re.IGNORECASE).strip()
+        if new_statut != statut_raw:
+            logger.debug(f"🧹 Statut nettoyé pour [{elu_name}] : '{statut_raw}' → '{new_statut}'")
+            return new_statut
+            
+    return str(statut_raw).strip()
+
 def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate]) -> List[dict]:
     """Génère les alertes métier en comparant Photo A (CSV Salesforce) et Photo B (Scraping Web)."""
     alerts_dict = {}
@@ -321,7 +346,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "commune": m.ville_ou_secteur,
                     "strate_priorite": strate,
                     "statut_salesforce_actuel": statuts_actuels,
-                    "statut_trouve_web": statut_trouve,
+                    "statut_trouve_web": clean_statut_web(statut_trouve, nom_complet),
                     "source_url_trouvee": m.source_url,
                     "niveau_confiance": "HIGH",
                     "mandat_name": list_a[0].get("mandat_name", ""),
