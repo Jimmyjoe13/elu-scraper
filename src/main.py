@@ -369,12 +369,43 @@ def get_strate_priorite(ville: str) -> str:
 
 def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate], custom_date: str = None) -> List[dict]:
     """Génère les alertes métier en comparant Photo A (CSV Salesforce) et Photo B (Scraping Web)."""
+    from collections import defaultdict
     alerts_dict = {}
-    
+
     # Résolution de la date de détection (custom ou maintenant)
     detection_date = custom_date if custom_date else datetime.utcnow().isoformat() + "Z"
-    
+
+    # ── Pré-traitement : déduplication par personne ──
+    # Si le même élu est trouvé sur plusieurs blocs avec des fonctions différentes
+    # (ex: "Maire" depuis un titre de section + "Adjoint" depuis le bon bloc),
+    # on garde UNIQUEMENT le mandat le plus conservateur (poids le plus bas).
+    # Si un match exact avec Photo A existe → skip complet (aucune alerte).
+    person_groups = defaultdict(list)
     for m in mandates:
+        pkey = (normalize_ville(m.ville_ou_secteur),
+                normalize_string(f"{m.prenom} {m.nom}"))
+        person_groups[pkey].append(m)
+
+    mandates_for_alerts = []
+    for pkey, group in person_groups.items():
+        ville_norm, nom_norm = pkey
+        nom_reverse_norm = normalize_string(f"{group[0].nom} {group[0].prenom}")
+        list_a = (photo_a.get(f"{ville_norm}---{nom_norm}")
+                  or photo_a.get(f"{ville_norm}---{nom_reverse_norm}")
+                  or [])
+
+        if list_a:
+            sf_canons = {normalize_fonction(a["fonction"]) for a in list_a}
+            # Si un mandat web matche exactement Photo A → pas d'alerte pour cette personne
+            if any(normalize_fonction(m_inner.fonction) in sf_canons for m_inner in group):
+                continue
+
+        # Pas de match exact : garder le mandat le plus conservateur
+        # (poids le plus bas = promotion la plus faible = moins de risque de faux positif)
+        best = min(group, key=lambda m_inner: get_fonction_weight(normalize_fonction(m_inner.fonction)))
+        mandates_for_alerts.append(best)
+
+    for m in mandates_for_alerts:
         nom_complet = f"{m.prenom} {m.nom}"
         nom_complet_norm = normalize_string(nom_complet)
         nom_reverse_norm = normalize_string(f"{m.nom} {m.prenom}")
@@ -406,9 +437,10 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     )
                     continue
 
-                # Détection des promotions suspectes (saut hiérarchique > 1 niveau)
+                # Détection des promotions suspectes (toute promotion = MEDIUM)
+                # Adjoint→Maire (gap=1) est le pattern de faux positif le plus fréquent
                 niveau_confiance = "HIGH"
-                if poids_web > poids_sf_max + 1:
+                if poids_web > poids_sf_max:
                     niveau_confiance = "MEDIUM"
                     logger.debug(
                         f"⚠️ Promotion suspecte pour {nom_complet} ({m.ville_ou_secteur}): "

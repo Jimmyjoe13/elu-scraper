@@ -376,7 +376,14 @@ class GenericHtmlV1Parser(BaseParser):
         
         if len(nom) > 60:
             return False
-        
+
+        # Substring check : mots-clés de fonction qui fuient dans le prénom
+        # Ex: "Adjoint Christine" MARTINELLI → rejeté car "adjoint" dans prénom
+        if prenom:
+            prenom_lower = prenom.lower()
+            if any(kw in prenom_lower for kw in ['maire', 'adjoint', 'conseill', 'municipal', 'delegue', 'ville']):
+                return False
+
         if prenom and prenom.upper() in _NAME_BLACKLIST:
             return False
         if nom.upper() in _NAME_BLACKLIST:
