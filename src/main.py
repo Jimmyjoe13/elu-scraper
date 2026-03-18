@@ -110,7 +110,9 @@ def normalize_fonction(s: str) -> str:
         return "maire_arrondissement"
     
     # Maire (simple)
-    if re.search(r'\bmaire\b', f):
+    # "maire" doit être en position de TITRE, pas dans une sous-clause ("auprès du maire", "délégation du maire")
+    # On exclut les patterns où "maire" est précédé de prépositions (du, au, de la, à la, par le)
+    if re.search(r'\bmaire\b', f) and not re.search(r'\b(?:du|au|de la|à la|par le|par la|auprès du|auprès de la|adjoint au|adjointe au|adjointe à la|adjoint à la)\s+maire\b', f):
         return "maire"
     
     # Conseiller(ère) — toutes variantes (municipal, de Paris, d'arrondissement, délégué)

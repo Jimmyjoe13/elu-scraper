@@ -281,21 +281,33 @@ class GenericHtmlV1Parser(BaseParser):
         return pairs
     
     def _extract_fonction(self, text: str) -> Optional[str]:
-        """Extrait la fonction sans la tronquer (Priorité Absolue)."""
-        # Si le bloc est relativement court, on prend tout (meilleur contexte)
-        if len(text) <= 150:
-            return text.strip()
-            
-        # Sinon, pour les très gros paragraphes, on capture 30 chars avant et 80 après l'ancre
-        pattern = re.compile(
-            r'(.{0,30}\b(?:maire|adjoint|conseill)\w*.{0,80})',
-            re.IGNORECASE
-        )
-        match = pattern.search(text)
-        if match:
-            return match.group(1).strip()
+        """Extrait la fonction en ciblant le titre fonctionnel, pas la description."""
         
-        return None
+        # Pattern prioritaire : capturer le titre fonctionnel AVANT toute virgule ou chiffre long
+        
+        # Règle 1 : Tronquer au premier chiffre long (téléphone, etc)
+        text_clean = re.sub(r'\s+\d[\d\s\.]{5,}.*$', '', text).strip()
+        
+        # Règle 2 : Tronquer à la première virgule ou point-virgule (la délégation suit)
+        text_clean = re.split(r'[,;]', text_clean)[0].strip()
+        
+        # Règle 3 : Limiter à 80 caractères max
+        if len(text_clean) > 80:
+            # Capturer le titre via ancre sémantique
+            pattern = re.compile(
+                r'(.{0,20}\b(?:maire|adjoint|conseill)\w*(?:\s+\w+){0,5})',
+                re.IGNORECASE
+            )
+            match = pattern.search(text_clean)
+            if match:
+                return match.group(1).strip()
+            return text_clean[:80].strip()
+        
+        # Si le bloc ne contient pas d'ancre sémantique → ne pas retourner
+        if not _ANCHOR_RE.search(text_clean):
+            return None
+        
+        return text_clean if text_clean else None
     
     def _extract_names(self, text: str) -> List[Tuple[str, str]]:
         """Extrait les noms avec une tolérance maximale."""
