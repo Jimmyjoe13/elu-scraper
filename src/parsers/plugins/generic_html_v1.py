@@ -29,6 +29,13 @@ _ANCHOR_RE = re.compile(
     r'\b(maire|adjoint|conseill)', re.IGNORECASE
 )
 
+# Filtre prépositionnel : "maire" précédé de ces prépositions = complément, pas titre
+_PREP_MAIRE_RE = re.compile(
+    r'\b(?:du|au|de la|[aà] la|par le|par la|aupr[eè]s du|aupr[eè]s de la|'
+    r'd[eé]l[eé]gation du|pr[eé]sence du|convocation du)\s+maire\b',
+    re.IGNORECASE
+)
+
 # Suppression de _FUNC_RE rigide, remplacé par une méthode _extract_fonction agnostique et gloutonne.
 
 # Pattern 1 : Prénom NOM (NOM tout en majuscules, au moins 2 lettres)
@@ -295,22 +302,34 @@ class GenericHtmlV1Parser(BaseParser):
         # 4. Nettoyage final des résidus de ponctuation en fin de chaîne
         text_clean = text_clean.rstrip(".-: ")
 
-        # 5. Limiter à 80 caractères max avec ancre sémantique
-        if len(text_clean) > 80:
+        # 5. Limiter à 60 caractères max avec ancre sémantique
+        if len(text_clean) > 60:
             pattern = re.compile(
                 r'(.{0,30}\b(?:maire|adjoint|conseill)\w*(?:\s+\w+){0,6})',
                 re.IGNORECASE
             )
             match = pattern.search(text_clean)
             if match:
-                return match.group(1).strip()
-            return text_clean[:80].strip()
-        
-        # Si le bloc ne contient pas d'ancre sémantique → ne pas retourner
-        if not _ANCHOR_RE.search(text_clean):
-            return None
-        
-        return text_clean if text_clean else None
+                candidate = match.group(1).strip()
+            else:
+                return None
+        else:
+            # Si le bloc ne contient pas d'ancre sémantique → ne pas retourner
+            if not _ANCHOR_RE.search(text_clean):
+                return None
+            candidate = text_clean
+
+        # 6. Filtre prépositionnel : si "maire" est précédé d'une préposition
+        #    (du, au, auprès du, etc.) et qu'il n'y a pas d'autre ancre en position
+        #    de TITRE (adjoint/conseiller au début), c'est un complément, pas un titre
+        if candidate and _PREP_MAIRE_RE.search(candidate):
+            # Vérifier si adjoint/conseiller apparaît AVANT "maire" (= titre réel)
+            other_match = re.search(r'\b(?:adjoint|conseill)', candidate, re.IGNORECASE)
+            maire_match = re.search(r'\bmaire\b', candidate, re.IGNORECASE)
+            if not other_match or (maire_match and other_match.start() > maire_match.start()):
+                return None
+
+        return candidate if candidate else None
     
     def _extract_names(self, text: str) -> List[Tuple[str, str]]:
         """Extrait les noms avec une tolérance maximale."""

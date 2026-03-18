@@ -203,6 +203,22 @@ class SalesforceProvider:
             "report1773758799231.csv"
         ]
 
+    def _open_csv(self, csv_path: str):
+        """Ouvre un CSV avec détection d'encodage : utf-8-sig puis cp1252 fallback."""
+        try:
+            f = open(csv_path, encoding='utf-8-sig')
+            sample = f.read(8192)
+            if '\ufffd' in sample:
+                f.close()
+                logger.warning(f"Caractères de remplacement détectés dans {csv_path} avec utf-8-sig, fallback cp1252")
+                f = open(csv_path, encoding='cp1252')
+            else:
+                f.seek(0)
+            return f
+        except UnicodeDecodeError:
+            logger.warning(f"Échec décodage UTF-8 pour {csv_path}, fallback cp1252")
+            return open(csv_path, encoding='cp1252')
+
     def _clean_header(self, header: str) -> str:
         """Nettoie une clé d'en-tête CSV pour un accès déterministe."""
         if not header:
@@ -240,16 +256,16 @@ class SalesforceProvider:
                 logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
                 continue
                 
-            with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
+            with self._open_csv(csv_path) as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
                 except StopIteration:
                     continue
-                    
+
                 cleaned_headers = [self._clean_header(h) for h in headers]
                 logger.debug(f"Headers nettoyés détectés : {cleaned_headers}")
-                
+
                 # Ciblage robuste par index direct
                 # Ville (9), Elu:Nom (11), Fonction (12), Mandat (19), Type (20), Etat (21)
                 col_ville = cleaned_headers[9] if len(cleaned_headers) > 9 else None
@@ -320,13 +336,13 @@ class SalesforceProvider:
             if not os.path.exists(csv_path):
                 continue
                 
-            with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
+            with self._open_csv(csv_path) as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
                 except StopIteration:
                     continue
-                    
+
                 cleaned_headers = [self._clean_header(h) for h in headers]
                 col_ville = self._find_key(cleaned_headers, ["ville", "commune"])
                 col_cp = self._find_key(cleaned_headers, ["codepostal", "cp"])
@@ -389,11 +405,20 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                         f"SF={poids_sf_max} > Web={poids_web} ('{statut_trouve}')"
                     )
                     continue
-                
+
+                # Détection des promotions suspectes (saut hiérarchique > 1 niveau)
+                niveau_confiance = "HIGH"
+                if poids_web > poids_sf_max + 1:
+                    niveau_confiance = "MEDIUM"
+                    logger.debug(
+                        f"⚠️ Promotion suspecte pour {nom_complet} ({m.ville_ou_secteur}): "
+                        f"SF={poids_sf_max} -> Web={poids_web} ('{statut_trouve}')"
+                    )
+
                 # On prend le premier ID Salesforce par défaut ou le mandat 'principal' s'il y a une logique
                 sf_id = list_a[0]["id_salesforce"]
                 statuts_actuels = " | ".join([a["fonction"] for a in list_a])
-                
+
                 alerts_dict[sf_id] = {
                     "alerte_type": "MODIFICATION_FONCTION",
                     "elu": nom_complet,
@@ -402,7 +427,7 @@ def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMand
                     "statut_salesforce_actuel": statuts_actuels,
                     "statut_trouve_web": format_fonction_web(statut_trouve),
                     "source_url_trouvee": m.source_url,
-                    "niveau_confiance": "HIGH",
+                    "niveau_confiance": niveau_confiance,
                     "mandat_name": list_a[0].get("mandat_name", ""),
                     "parti_politique": list_a[0].get("parti_politique", ""),
                     "indicateur_epci": list_a[0].get("indicateur_epci", ""),
