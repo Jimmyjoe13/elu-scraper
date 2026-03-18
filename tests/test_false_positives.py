@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.parsers.plugins.generic_html_v1 import GenericHtmlV1Parser
+from src.parsers.plugins.auto_agent_v1 import AutoAgentV1Parser
 from src.main import generate_validation_alerts, normalize_fonction, get_fonction_weight
 from src.models.mandate import ElectedOfficialMandate
 
@@ -108,13 +109,13 @@ def _build_mandate(ville, prenom, nom, fonction, url="http://test.fr/elus"):
 class TestConfidencePromotions:
     """Tests pour le niveau de confiance des promotions suspectes."""
 
-    def test_adjoint_to_maire_is_high(self):
-        """Gap de 1 niveau (3→4) : confiance HIGH."""
+    def test_adjoint_to_maire_is_medium(self):
+        """Gap de 1 niveau (3→4) : confiance MEDIUM (toute promotion est suspecte)."""
         photo_a = _build_photo_a("TestVille", "Jean DUPONT", "Adjoint au Maire")
         mandates = [_build_mandate("TestVille", "Jean", "DUPONT", "Maire")]
         alerts = generate_validation_alerts(photo_a, mandates)
         assert len(alerts) == 1
-        assert alerts[0]["niveau_confiance"] == "HIGH"
+        assert alerts[0]["niveau_confiance"] == "MEDIUM"
 
     def test_conseiller_to_maire_is_medium(self):
         """Gap de 3 niveaux (1→4) : confiance MEDIUM."""
@@ -202,3 +203,168 @@ class TestCSVEncoding:
                     )
         finally:
             os.unlink(tmp_path)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Bug A (v2) : auto_agent_v1._extract_fonction() — alignement
+# ──────────────────────────────────────────────────────────────────
+
+class TestAutoAgentExtractFonction:
+    """Tests pour _extract_fonction() dans auto_agent_v1.py."""
+
+    def test_short_text_not_returned_verbatim(self):
+        """Un texte court (≤150 chars) NE doit PAS être retourné tel quel."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "Eric CHEVALIER Adjoint au Maire délégué"
+        )
+        assert result is not None
+        assert len(result) <= 60
+
+    def test_prep_maire_filtered(self):
+        """'délégation du Maire' = complément, pas titre → None."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "délégation du Maire pour l'urbanisme"
+        )
+        assert result is None
+
+    def test_adjoint_au_maire_preserved(self):
+        """'Adjoint au Maire' est un titre valide."""
+        result = AutoAgentV1Parser._extract_fonction("Adjoint au Maire")
+        assert result is not None
+        assert "adjoint" in result.lower()
+
+    def test_maire_simple(self):
+        """'Maire' seul est un titre valide."""
+        result = AutoAgentV1Parser._extract_fonction("Maire")
+        assert result is not None
+        assert "maire" in result.lower()
+
+    def test_email_stripped(self):
+        """Les e-mails doivent être nettoyés du résultat."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "Maire contact@mairie.fr suite du texte"
+        )
+        assert "@" not in (result or "")
+
+    def test_comma_truncation(self):
+        """Le texte est tronqué à la première virgule."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "Adjoint au Maire, délégué à l'urbanisme"
+        )
+        assert result == "Adjoint au Maire"
+
+    def test_aupres_du_maire_returns_none(self):
+        """'auprès du Maire' = complément → None."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "auprès du Maire de la commune"
+        )
+        assert result is None
+
+    def test_conseiller_aupres_du_maire(self):
+        """'Conseiller ... auprès du Maire' → conserve car 'conseiller' est en tête."""
+        result = AutoAgentV1Parser._extract_fonction(
+            "Conseiller municipal délégué auprès du Maire"
+        )
+        assert result is not None
+        assert result.lower().startswith("conseiller")
+
+
+# ──────────────────────────────────────────────────────────────────
+# Bug B (v2) : _is_valid_name() — vérification du prénom
+# ──────────────────────────────────────────────────────────────────
+
+class TestIsValidNamePrenom:
+    """Tests pour _is_valid_name() : rejet des mots-clés de fonction dans le prénom."""
+
+    @pytest.fixture
+    def generic_parser(self):
+        return GenericHtmlV1Parser(url="http://test.fr", ville_ou_secteur="Test")
+
+    def test_adjoint_in_prenom_rejected(self, generic_parser):
+        assert generic_parser._is_valid_name("Adjoint Christine", "MARTINELLI") is False
+
+    def test_maire_in_prenom_rejected(self, generic_parser):
+        assert generic_parser._is_valid_name("Maire Sylvie", "FERNANDEZ") is False
+
+    def test_ville_in_prenom_rejected(self, generic_parser):
+        assert generic_parser._is_valid_name("Ville Jean-Michel", "MONPAYS") is False
+
+    def test_conseiller_in_prenom_rejected(self, generic_parser):
+        assert generic_parser._is_valid_name("Conseiller Jean", "DUPONT") is False
+
+    def test_municipal_in_prenom_rejected(self, generic_parser):
+        assert generic_parser._is_valid_name("Municipal Adjoint", "DUPONT") is False
+
+    def test_normal_prenom_accepted(self, generic_parser):
+        assert generic_parser._is_valid_name("Christine", "MARTINELLI") is True
+
+    def test_compound_prenom_accepted(self, generic_parser):
+        assert generic_parser._is_valid_name("Jean-Michel", "MONPAYS") is True
+
+    def test_auto_agent_adjoint_in_prenom_rejected(self):
+        assert AutoAgentV1Parser._is_valid_name("Adjoint Christine", "MARTINELLI") is False
+
+    def test_auto_agent_maire_in_prenom_rejected(self):
+        assert AutoAgentV1Parser._is_valid_name("Maire Sylvie", "FERNANDEZ") is False
+
+    def test_auto_agent_normal_prenom_accepted(self):
+        assert AutoAgentV1Parser._is_valid_name("Christine", "MARTINELLI") is True
+
+
+# ──────────────────────────────────────────────────────────────────
+# Bug C (v2) : Déduplication par personne dans generate_validation_alerts
+# ──────────────────────────────────────────────────────────────────
+
+class TestPerPersonDedup:
+    """Tests pour la déduplication par personne avant comparaison."""
+
+    def test_correct_match_blocks_false_maire(self):
+        """Même personne avec 'Adjoint' (correct) ET 'Maire' (faux).
+        SF dit 'Adjoint' → aucune alerte."""
+        photo_a = _build_photo_a("Aix-en-Provence", "Eric CHEVALIER", "Adjoint au Maire")
+        mandates = [
+            _build_mandate("Aix-en-Provence", "Eric", "CHEVALIER", "Adjoint au Maire"),
+            _build_mandate("Aix-en-Provence", "Eric", "CHEVALIER", "Maire"),
+        ]
+        alerts = generate_validation_alerts(photo_a, mandates)
+        assert len(alerts) == 0
+
+    def test_no_match_keeps_most_conservative(self):
+        """SF dit 'Conseiller', web a 'Adjoint' + 'Maire'.
+        Seul 'Adjoint' (le plus conservateur) génère l'alerte."""
+        photo_a = _build_photo_a("TestVille", "Jean DUPONT", "Conseiller Municipal")
+        mandates = [
+            _build_mandate("TestVille", "Jean", "DUPONT", "Adjoint au Maire"),
+            _build_mandate("TestVille", "Jean", "DUPONT", "Maire"),
+        ]
+        alerts = generate_validation_alerts(photo_a, mandates)
+        assert len(alerts) == 1
+        assert "Adjoint" in alerts[0]["statut_trouve_web"]
+
+    def test_single_mandate_unchanged(self):
+        """Personne avec un seul mandat web → comportement inchangé."""
+        photo_a = _build_photo_a("TestVille", "Jean DUPONT", "Conseiller Municipal")
+        mandates = [_build_mandate("TestVille", "Jean", "DUPONT", "Maire")]
+        alerts = generate_validation_alerts(photo_a, mandates)
+        assert len(alerts) == 1
+
+    def test_unknown_person_no_alert(self):
+        """Personne absente de Photo A → aucune alerte quoi qu'il arrive."""
+        photo_a = {}
+        mandates = [
+            _build_mandate("TestVille", "Jean", "DUPONT", "Maire"),
+            _build_mandate("TestVille", "Jean", "DUPONT", "Adjoint au Maire"),
+        ]
+        alerts = generate_validation_alerts(photo_a, mandates)
+        assert len(alerts) == 0
+
+    def test_exact_match_with_multiple_web_entries(self):
+        """3 entrées web dont 1 matche SF → aucune alerte pour cette personne."""
+        photo_a = _build_photo_a("TestVille", "Jean DUPONT", "Adjoint au Maire")
+        mandates = [
+            _build_mandate("TestVille", "Jean", "DUPONT", "Conseiller Municipal"),
+            _build_mandate("TestVille", "Jean", "DUPONT", "Adjoint au Maire"),
+            _build_mandate("TestVille", "Jean", "DUPONT", "Maire"),
+        ]
+        alerts = generate_validation_alerts(photo_a, mandates)
+        assert len(alerts) == 0

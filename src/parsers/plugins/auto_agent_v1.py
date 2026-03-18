@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 _ANCHOR_RE = re.compile(r'\b(maire|adjoint|conseill)', re.IGNORECASE)
 
+# Filtre prépositionnel : "maire" précédé de ces prépositions = complément, pas titre
+_PREP_MAIRE_RE = re.compile(
+    r'\b(?:du|au|de la|[aà] la|par le|par la|aupr[eè]s du|aupr[eè]s de la|'
+    r'd[eé]l[eé]gation du|pr[eé]sence du|convocation du)\s+maire\b',
+    re.IGNORECASE
+)
+
 _UP = "A-ZÉÈÊËÀÂÎÏÔÙÛÜÇÑ"
 _LO = "a-zéèêëàâîïôùûüçñ"
 
@@ -482,15 +489,46 @@ class AutoAgentV1Parser(BaseParser):
 
     @staticmethod
     def _extract_fonction(text: str) -> Optional[str]:
-        """Extrait la fonction du bloc de texte."""
-        if len(text) <= 150:
-            return text.strip()
-        pattern = re.compile(
-            r'(.{0,30}\b(?:maire|adjoint|conseill)\w*.{0,80})',
-            re.IGNORECASE,
-        )
-        match = pattern.search(text)
-        return match.group(1).strip() if match else None
+        """Extrait la fonction en ciblant le titre fonctionnel, pas la description.
+
+        Aligné sur generic_html_v1._extract_fonction() (source de vérité).
+        """
+        # 1. Nettoyage du bruit : adresses e-mail
+        text_clean = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b.*$', '', text).strip()
+
+        # 2. Tronquer au premier chiffre long (téléphone, etc.)
+        text_clean = re.sub(r'\s+\d[\d\s\.]{5,}.*$', '', text_clean).strip()
+
+        # 3. Tronquer à la première virgule ou point-virgule
+        text_clean = re.split(r'[,;]', text_clean)[0].strip()
+
+        # 4. Nettoyage final des résidus de ponctuation
+        text_clean = text_clean.rstrip(".-: ")
+
+        # 5. Limiter à 60 caractères max avec ancre sémantique
+        if len(text_clean) > 60:
+            pattern = re.compile(
+                r'(.{0,30}\b(?:maire|adjoint|conseill)\w*(?:\s+\w+){0,6})',
+                re.IGNORECASE
+            )
+            match = pattern.search(text_clean)
+            if match:
+                candidate = match.group(1).strip()
+            else:
+                return None
+        else:
+            if not _ANCHOR_RE.search(text_clean):
+                return None
+            candidate = text_clean
+
+        # 6. Filtre prépositionnel : "maire" précédé de du/au/auprès du = complément
+        if candidate and _PREP_MAIRE_RE.search(candidate):
+            other_match = re.search(r'\b(?:adjoint|conseill)', candidate, re.IGNORECASE)
+            maire_match = re.search(r'\bmaire\b', candidate, re.IGNORECASE)
+            if not other_match or (maire_match and other_match.start() > maire_match.start()):
+                return None
+
+        return candidate if candidate else None
 
     @staticmethod
     def _extract_names(text: str) -> List[Tuple[str, str]]:
@@ -532,6 +570,12 @@ class AutoAgentV1Parser(BaseParser):
             return False
         if len(nom) > 60:
             return False
+        # Substring check : mots-clés de fonction qui fuient dans le prénom
+        # Ex: "Adjoint Christine" MARTINELLI → rejeté car "adjoint" dans prénom
+        if prenom:
+            prenom_lower = prenom.lower()
+            if any(kw in prenom_lower for kw in ['maire', 'adjoint', 'conseill', 'municipal', 'delegue', 'ville']):
+                return False
         if prenom and prenom.upper() in _NAME_BLACKLIST:
             return False
         if nom.upper() in _NAME_BLACKLIST:
