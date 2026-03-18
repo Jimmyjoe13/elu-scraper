@@ -223,7 +223,7 @@ class SalesforceProvider:
                     return k
         return ""
 
-    async def get_photo_a(self) -> dict:
+    async def get_photo_a(self, date_photo_a: str) -> dict:
         """Charge l'état actuel (Photo A) depuis les CSV Salesforce."""
         # TODO (PROD): Remplacer la lecture CSV par un call API SOQL vers Salesforce
         # SCHEMA DE REQUÊTE ATTENDU:
@@ -231,23 +231,23 @@ class SalesforceProvider:
         # FROM Mandat__c
         # WHERE IsActive = TRUE
         photo_a = {}
-        
+
         for filename in self.csv_files:
             csv_path = os.path.join(self.root_dir, filename)
             if not os.path.exists(csv_path):
                 logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
                 continue
-                
+
             with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
                 except StopIteration:
                     continue
-                    
+
                 cleaned_headers = [self._clean_header(h) for h in headers]
                 logger.debug(f"Headers nettoyés détectés : {cleaned_headers}")
-                
+
                 # Ciblage robuste par index direct
                 # Ville (9), Elu:Nom (11), Fonction (12), Mandat (19), Type (20), Etat (21)
                 col_ville = cleaned_headers[9] if len(cleaned_headers) > 9 else None
@@ -256,7 +256,7 @@ class SalesforceProvider:
                 col_mandat = cleaned_headers[19] if len(cleaned_headers) > 19 else None
                 col_type_mandat = cleaned_headers[20] if len(cleaned_headers) > 20 else None
                 col_etat_contrat = cleaned_headers[21] if len(cleaned_headers) > 21 else None
-                
+
                 # Fallback pour les colonnes optionnelles
                 col_parti = "partipolitique" if "partipolitique" in cleaned_headers else None
                 col_epci = "epci" if "epci" in cleaned_headers else None
@@ -266,48 +266,38 @@ class SalesforceProvider:
                 if not col_ville or not col_nom:
                     logger.error(f"Colonnes critiques introuvables dans {csv_path}. Headers: {cleaned_headers}")
                     continue
-                
+
                 reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
                 for row in reader:
                     ville = row.get(col_ville, "")
                     elu_nom = row.get(col_nom, "")
                     fonction = row.get(col_fonction, "")
                     mandat_id = row.get(col_mandat, "")
-                    
+
                     if not ville or not elu_nom:
                         continue
-                        
+
                     v_norm = normalize_ville(ville)
-                    elu_nom_norm = normalize_string(elu_nom)
-                    
-                    # Génération des deux clés : Ville---Nom Prenom et Ville---Prenom Nom
-                    # En inversant les mots, on couvre la permutation nom/prenom
-                    words = elu_nom_norm.split()
-                    elu_nom_reversed = " ".join(reversed(words))
-                    
-                    key_1 = f"{v_norm}---{elu_nom_norm}"
-                    key_2 = f"{v_norm}---{elu_nom_reversed}"
-                    
-                    val = {
-                        "fonction": fonction.strip(),
-                        "id_salesforce": mandat_id.strip(),
+                    fonction_canon = normalize_fonction(fonction)
+                    if not fonction_canon:
+                        logger.debug(f"Fonction vide ignorée pour {elu_nom} ({ville})")
+                        continue
+                    key = f"{v_norm}---{fonction_canon}"
+
+                    if key in photo_a:
+                        logger.warning(f"Doublon fonction ignoré : {key} (déjà présent)")
+                        continue
+
+                    photo_a[key] = {
+                        "nom": elu_nom.strip(),
                         "raw_nom": elu_nom.strip(),
-                        "raw_ville": ville.strip(),
-                        "mandat_name": row.get(col_mandat, "").strip() if col_mandat else "",
-                        "parti_politique": row.get(col_parti, "").strip() if col_parti else "",
-                        "indicateur_epci": row.get(col_epci, "").strip() if col_epci else "",
-                        # NOUVEAUX CHAMPS :
+                        "date_photo_a": date_photo_a,
+                        "id_salesforce": mandat_id.strip(),
                         "type_mandat": _normalize_type_mandat(row.get(col_type_mandat, "")),
-                        "etat_contrat": _normalize_etat_contrat(row.get(col_etat_contrat, ""))
+                        "etat_contrat": _normalize_etat_contrat(row.get(col_etat_contrat, "")),
+                        "raw_ville": ville.strip()
                     }
-                    
-                    # On initialise avec une liste si la clé n'existe pas
-                    if key_1 not in photo_a: photo_a[key_1] = []
-                    if key_2 not in photo_a: photo_a[key_2] = []
-                    
-                    photo_a[key_1].append(val)
-                    photo_a[key_2].append(val)
-                    
+
         return photo_a
 
     async def get_villes_cp_map(self) -> dict:
