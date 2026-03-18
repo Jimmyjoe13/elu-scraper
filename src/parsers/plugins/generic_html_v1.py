@@ -260,29 +260,81 @@ class GenericHtmlV1Parser(BaseParser):
         
         return results
 
+    # Regex de co-localisation : fonction et nom adjacents (< ~60 chars de distance)
+    # Pattern A : Fonction précède le nom (ex: "Adjoint au Maire Marc FERAUD")
+    _COLOC_FUNC_THEN_NAME_RE = re.compile(
+        rf'\b((?:maire|adjoint[e]?|conseill\w+)(?:\s+\w+){{0,4}})\s{{1,20}}'
+        rf'([{_UP}][{_LO}]+(?:[\s-][{_UP}][{_LO}]+)*)\s+'
+        rf'([{_UP}]{{2,}}(?:[\s-][{_UP}]{{2,}})*)',
+        re.IGNORECASE | re.UNICODE
+    )
+    # Pattern B : Nom précède la fonction (ex: "Marc FERAUD Adjoint au Maire")
+    _COLOC_NAME_THEN_FUNC_RE = re.compile(
+        rf'([{_UP}][{_LO}]+(?:[\s-][{_UP}][{_LO}]+)*)\s+'
+        rf'([{_UP}]{{2,}}(?:[\s-][{_UP}]{{2,}})*)\s{{1,30}}'
+        rf'\b((?:maire|adjoint[e]?|conseill\w+)(?:\s+\w+){{0,4}})',
+        re.IGNORECASE | re.UNICODE
+    )
+
     def _extract_pairs_from_text(self, text: str) -> List[Tuple[str, str, str]]:
-        """Extrait les couples (nom, fonction) de manière infaillible (Proof of Fail)."""
+        """Extrait les couples (nom, fonction) par co-localisation stricte.
+
+        Cherche des patterns où NOM et FONCTION sont adjacents, afin d'associer
+        chaque nom à sa propre fonction (et non une unique fonction pour tout le bloc).
+        """
         pairs = []
-        
-        fonction = self._extract_fonction(text)
-        if not fonction:
+        seen_names = set()
+
+        # Stratégie 1 : Co-localisation — Fonction puis Nom
+        for match in self._COLOC_FUNC_THEN_NAME_RE.finditer(text):
+            fonction_raw = match.group(1).strip()
+            prenom = match.group(2).strip()
+            nom = match.group(3).strip()
+            if self._is_valid_name(prenom, nom):
+                fonction = self._extract_fonction(fonction_raw)
+                if fonction:
+                    key = f"{prenom.lower()}-{nom.lower()}"
+                    if key not in seen_names:
+                        seen_names.add(key)
+                        pairs.append((prenom, nom, fonction))
+
+        # Stratégie 2 : Co-localisation — Nom puis Fonction
+        for match in self._COLOC_NAME_THEN_FUNC_RE.finditer(text):
+            prenom = match.group(1).strip()
+            nom = match.group(2).strip()
+            fonction_raw = match.group(3).strip()
+            if self._is_valid_name(prenom, nom):
+                key = f"{prenom.lower()}-{nom.lower()}"
+                if key not in seen_names:
+                    fonction = self._extract_fonction(fonction_raw)
+                    if fonction:
+                        seen_names.add(key)
+                        pairs.append((prenom, nom, fonction))
+
+        if pairs:
             return pairs
-        
-        names = self._extract_names(text)
-        
-        if names:
-            for prenom, nom in names:
-                pairs.append((prenom, nom, fonction))
-        else:
-            # Fallback Ultime : si aucune Regex de nom n'a marché, on garde TOUT le bloc.
-            # La donnée ne sera jamais perdue, le main.py s'en occupera!
-            pairs.append(("", text.strip()[:100], fonction))
-        
+
+        # Fallback sécurisé : ancienne logique 1-fonction seulement pour les blocs courts
+        # (≤ 150 chars → quasi-certitude qu'il n'y a qu'un seul élu)
+        if len(text) <= 150:
+            fonction = self._extract_fonction(text)
+            if not fonction:
+                return pairs
+            names = self._extract_names(text)
+            if names:
+                for prenom, nom in names:
+                    pairs.append((prenom, nom, fonction))
+            # PAS de fallback texte brut — supprimé pour éviter la pollution
+
         return pairs
     
     def _extract_fonction(self, text: str) -> Optional[str]:
         """Extrait la fonction en ciblant le titre fonctionnel, pas la description."""
-        
+
+        # Guard : rejeter les en-têtes de section purs (< 40 chars, sans nom détectable)
+        if len(text) < 40 and not _NAME_PRENOM_NOM_RE.search(text) and not _NAME_TITLE_RE.search(text):
+            return None
+
         # Pattern prioritaire : capturer le titre fonctionnel AVANT toute virgule ou chiffre long
         
         # Règle 1 : Tronquer au premier chiffre long (téléphone, etc)
@@ -368,6 +420,10 @@ class GenericHtmlV1Parser(BaseParser):
     
     def _search_name_in_neighbors(self, tag) -> Optional[Tuple[str, str]]:
         """Cherche un nom dans les éléments DOM voisins (frères et parent)."""
+        # Guard : ne pas propager depuis un en-tête structurel
+        if tag.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'th'):
+            return None
+
         # Frère précédent
         prev = tag.find_previous_sibling()
         if prev:
