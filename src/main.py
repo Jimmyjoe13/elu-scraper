@@ -7,10 +7,10 @@ import csv
 import unicodedata
 import re
 import uuid
-import json
-import argparse
 from typing import List, Dict
 from datetime import datetime
+import sys
+import argparse
 
 from src.parsers.factory import ParserFactory
 from src.utils.cache import DiffCacheManager
@@ -225,7 +225,7 @@ class SalesforceProvider:
                     return k
         return ""
 
-    async def get_photo_a(self, date_photo_a: str) -> dict:
+    async def get_photo_a(self) -> dict:
         """Charge l'état actuel (Photo A) depuis les CSV Salesforce."""
         # TODO (PROD): Remplacer la lecture CSV par un call API SOQL vers Salesforce
         # SCHEMA DE REQUÊTE ATTENDU:
@@ -233,23 +233,23 @@ class SalesforceProvider:
         # FROM Mandat__c
         # WHERE IsActive = TRUE
         photo_a = {}
-
+        
         for filename in self.csv_files:
             csv_path = os.path.join(self.root_dir, filename)
             if not os.path.exists(csv_path):
                 logger.warning(f"Fichier Salesforce {csv_path} introuvable.")
                 continue
-
+                
             with open(csv_path, encoding='utf-8-sig', errors='replace') as f:
                 reader_obj = csv.reader(f, delimiter=';')
                 try:
                     headers = next(reader_obj)
                 except StopIteration:
                     continue
-
+                    
                 cleaned_headers = [self._clean_header(h) for h in headers]
                 logger.debug(f"Headers nettoyés détectés : {cleaned_headers}")
-
+                
                 # Ciblage robuste par index direct
                 # Ville (9), Elu:Nom (11), Fonction (12), Mandat (19), Type (20), Etat (21)
                 col_ville = cleaned_headers[9] if len(cleaned_headers) > 9 else None
@@ -258,7 +258,7 @@ class SalesforceProvider:
                 col_mandat = cleaned_headers[19] if len(cleaned_headers) > 19 else None
                 col_type_mandat = cleaned_headers[20] if len(cleaned_headers) > 20 else None
                 col_etat_contrat = cleaned_headers[21] if len(cleaned_headers) > 21 else None
-
+                
                 # Fallback pour les colonnes optionnelles
                 col_parti = "partipolitique" if "partipolitique" in cleaned_headers else None
                 col_epci = "epci" if "epci" in cleaned_headers else None
@@ -268,38 +268,48 @@ class SalesforceProvider:
                 if not col_ville or not col_nom:
                     logger.error(f"Colonnes critiques introuvables dans {csv_path}. Headers: {cleaned_headers}")
                     continue
-
+                
                 reader = csv.DictReader(f, fieldnames=cleaned_headers, delimiter=';')
                 for row in reader:
                     ville = row.get(col_ville, "")
                     elu_nom = row.get(col_nom, "")
                     fonction = row.get(col_fonction, "")
                     mandat_id = row.get(col_mandat, "")
-
+                    
                     if not ville or not elu_nom:
                         continue
-
+                        
                     v_norm = normalize_ville(ville)
-                    fonction_canon = normalize_fonction(fonction)
-                    if not fonction_canon:
-                        logger.debug(f"Fonction vide ignorée pour {elu_nom} ({ville})")
-                        continue
-                    key = f"{v_norm}---{fonction_canon}"
-
-                    if key in photo_a:
-                        logger.warning(f"Doublon fonction ignoré : {key} (déjà présent)")
-                        continue
-
-                    photo_a[key] = {
-                        "nom": elu_nom.strip(),
-                        "raw_nom": elu_nom.strip(),
-                        "date_photo_a": date_photo_a,
+                    elu_nom_norm = normalize_string(elu_nom)
+                    
+                    # Génération des deux clés : Ville---Nom Prenom et Ville---Prenom Nom
+                    # En inversant les mots, on couvre la permutation nom/prenom
+                    words = elu_nom_norm.split()
+                    elu_nom_reversed = " ".join(reversed(words))
+                    
+                    key_1 = f"{v_norm}---{elu_nom_norm}"
+                    key_2 = f"{v_norm}---{elu_nom_reversed}"
+                    
+                    val = {
+                        "fonction": fonction.strip(),
                         "id_salesforce": mandat_id.strip(),
+                        "raw_nom": elu_nom.strip(),
+                        "raw_ville": ville.strip(),
+                        "mandat_name": row.get(col_mandat, "").strip() if col_mandat else "",
+                        "parti_politique": row.get(col_parti, "").strip() if col_parti else "",
+                        "indicateur_epci": row.get(col_epci, "").strip() if col_epci else "",
+                        # NOUVEAUX CHAMPS :
                         "type_mandat": _normalize_type_mandat(row.get(col_type_mandat, "")),
-                        "etat_contrat": _normalize_etat_contrat(row.get(col_etat_contrat, "")),
-                        "raw_ville": ville.strip()
+                        "etat_contrat": _normalize_etat_contrat(row.get(col_etat_contrat, ""))
                     }
-
+                    
+                    # On initialise avec une liste si la clé n'existe pas
+                    if key_1 not in photo_a: photo_a[key_1] = []
+                    if key_2 not in photo_a: photo_a[key_2] = []
+                    
+                    photo_a[key_1].append(val)
+                    photo_a[key_2].append(val)
+                    
         return photo_a
 
     async def get_villes_cp_map(self) -> dict:
@@ -341,79 +351,76 @@ def get_strate_priorite(ville: str) -> str:
     return "Non définie"
 
 
-def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate], date_photo_a: str) -> tuple:
+def generate_validation_alerts(photo_a: dict, mandates: List[ElectedOfficialMandate], custom_date: str = None) -> List[dict]:
     """Génère les alertes métier en comparant Photo A (CSV Salesforce) et Photo B (Scraping Web)."""
-    # ÉTAPE A — Construire photo_b depuis les mandates scrapés
-    photo_b = {}
+    alerts_dict = {}
+    
+    # Résolution de la date de détection (custom ou maintenant)
+    detection_date = custom_date if custom_date else datetime.utcnow().isoformat() + "Z"
+    
     for m in mandates:
+        nom_complet = f"{m.prenom} {m.nom}"
+        nom_complet_norm = normalize_string(nom_complet)
+        nom_reverse_norm = normalize_string(f"{m.nom} {m.prenom}")
         ville_norm = normalize_ville(m.ville_ou_secteur)
-        fonction_canon = normalize_fonction(m.fonction)
-        if not fonction_canon:
-            continue
-        key = f"{ville_norm}---{fonction_canon}"
-        date_det = m.date_extraction.strftime("%d%m%y")
-        photo_b[key] = {
-            "nom": normalize_string(f"{m.prenom} {m.nom}"),
-            "raw_nom": f"{m.prenom} {m.nom}",
-            "date_detection": date_det,
-            "source_url": m.source_url
-        }
-
-    # ÉTAPE B — Comparer photo_a vs photo_b
-    alerts = []
-    non_couverte_list = []
-    for key, data_a in photo_a.items():
-        parts = key.split("---", 1)
-        if len(parts) != 2:
-            continue
-        ville_raw, fonction_canon = parts
-        if key in photo_b:
-            data_b = photo_b[key]
-            nom_a = normalize_string(data_a.get("nom", ""))
-            nom_b = normalize_string(data_b.get("nom", ""))
-            if nom_a != nom_b:
-                alerts.append({
-                    "alerte_type": "CHANGEMENT",
-                    "ancien_nom": data_a.get("raw_nom", ""),
-                    "nouveau_nom": data_b.get("raw_nom", ""),
-                    "fonction": fonction_canon,
-                    "commune": data_a.get("raw_ville", ""),
-                    "source_url": data_b.get("source_url", ""),
-                    "id_salesforce": data_a.get("id_salesforce", ""),
-                    "type_mandat": data_a.get("type_mandat", "INCONNU"),
-                    "etat_contrat": data_a.get("etat_contrat", "inconnu"),
-                    "date_photo_a": date_photo_a,
-                    "date_detection": data_b.get("date_detection", ""),
-                    "strate_priorite": get_strate_priorite(data_a.get("raw_ville", "")),
-                    "niveau_confiance": "HIGH"
-                })
-            else:
-                try:
-                    d_a = datetime.strptime(date_photo_a, "%d%m%y")
-                    d_b = datetime.strptime(data_b.get("date_detection", ""), "%d%m%y")
-                    if d_b > d_a:
-                        alerts.append({
-                            "alerte_type": "CONFIRMATION",
-                            "nom": data_a.get("raw_nom", ""),
-                            "fonction": fonction_canon,
-                            "commune": data_a.get("raw_ville", ""),
-                            "date_site": data_b.get("date_detection", ""),
-                            "date_photo_a": date_photo_a,
-                            "id_salesforce": data_a.get("id_salesforce", ""),
-                            "source_url": data_b.get("source_url", ""),
-                            "strate_priorite": get_strate_priorite(data_a.get("raw_ville", ""))
-                        })
-                except ValueError:
-                    pass
+        
+        statut_trouve = m.fonction
+        strate = get_strate_priorite(m.ville_ou_secteur)
+        
+        # On cherche l'élu dans Photo A (qui retourne maintenant une LISTE)
+        list_a = photo_a.get(f"{ville_norm}---{nom_complet_norm}") or photo_a.get(f"{ville_norm}---{nom_reverse_norm}") or []
+        
+        if list_a:
+            # Comparaison sémantique : on compare les RACINES canoniques (adjoint, maire, conseiller)
+            # et non les chaînes brutes, pour éliminer les faux positifs de formulation
+            statut_trouve_canon = normalize_fonction(statut_trouve)
+            match_found = any(normalize_fonction(a["fonction"]) == statut_trouve_canon for a in list_a)
+            
+            if not match_found:
+                # ── Matrice de suprématie : filtrer les fausses rétrogradations ──
+                # Un Maire apparaît souvent comme Conseiller sur des pages secondaires.
+                # Si le poids SF est SUPÉRIEUR au poids Web, c'est du bruit structurel.
+                poids_web = get_fonction_weight(statut_trouve_canon)
+                poids_sf_max = max(get_fonction_weight(normalize_fonction(a["fonction"])) for a in list_a)
+                
+                if poids_sf_max > poids_web and poids_web > 0:
+                    logger.debug(
+                        f"⏭️ Fausse rétrogradation ignorée pour {nom_complet} ({m.ville_ou_secteur}): "
+                        f"SF={poids_sf_max} > Web={poids_web} ('{statut_trouve}')"
+                    )
+                    continue
+                
+                # On prend le premier ID Salesforce par défaut ou le mandat 'principal' s'il y a une logique
+                sf_id = list_a[0]["id_salesforce"]
+                statuts_actuels = " | ".join([a["fonction"] for a in list_a])
+                
+                alerts_dict[sf_id] = {
+                    "alerte_type": "MODIFICATION_FONCTION",
+                    "elu": nom_complet,
+                    "commune": m.ville_ou_secteur,
+                    "strate_priorite": strate,
+                    "statut_salesforce_actuel": statuts_actuels,
+                    "statut_trouve_web": format_fonction_web(statut_trouve),
+                    "source_url_trouvee": m.source_url,
+                    "niveau_confiance": "HIGH",
+                    "mandat_name": list_a[0].get("mandat_name", ""),
+                    "parti_politique": list_a[0].get("parti_politique", ""),
+                    "indicateur_epci": list_a[0].get("indicateur_epci", ""),
+                    # NOUVEAUX CHAMPS GAP 2 :
+                    "type_mandat": list_a[0].get("type_mandat", "INCONNU"),
+                    "etat_contrat": list_a[0].get("etat_contrat", "inconnu"),
+                    "date_detection": detection_date
+                }
         else:
-            non_couverte_list.append({
-                "fonction": fonction_canon,
-                "commune": data_a.get("raw_ville", ""),
-                "nom_attendu": data_a.get("raw_nom", ""),
-                "id_salesforce": data_a.get("id_salesforce", "")
-            })
-
-    return alerts, non_couverte_list
+            key_tried = f"{ville_norm}---{nom_complet_norm}"
+            nb_keys_ville = sum(1 for k in photo_a if k.startswith(ville_norm + "---"))
+            logger.debug(
+                f"Élu {nom_complet} ({m.ville_ou_secteur}) absent de Photo A. "
+                f"Clé cherchée: '{key_tried}'. "
+                f"Clés Photo A pour '{ville_norm}': {nb_keys_ville}"
+            )
+            
+    return list(alerts_dict.values())
 
 async def process_url(session: aiohttp.ClientSession, row: Dict, cache: Dict, map_cp: dict) -> tuple:
     url = row.get("url")
@@ -475,7 +482,7 @@ async def load_urls_from_db(db_path: str) -> List[Dict]:
                 })
     return urls
 
-async def _execute_main(run_id: str, date_photo_a: str):
+async def _execute_main(run_id: str, custom_date: str = None):
     root_dir = os.path.dirname(os.path.dirname(__file__))
     db_path = os.path.join(root_dir, 'elus_sources.db')
     
@@ -487,7 +494,7 @@ async def _execute_main(run_id: str, date_photo_a: str):
     # Instanciation du provider et chargement de la Photo A et des CP
     logger.info("Chargement des données Salesforce (Photo A)...")
     provider = SalesforceProvider(root_dir)
-    photo_a = await provider.get_photo_a(date_photo_a=date_photo_a)
+    photo_a = await provider.get_photo_a()
     logger.debug(f"Nombre de clés chargées dans la Photo A : {len(photo_a)}")
     map_cp = await provider.get_villes_cp_map()
 
@@ -514,23 +521,23 @@ async def _execute_main(run_id: str, date_photo_a: str):
         new_mandates = list(deduped.values())
 
         # Validation métier : Photo A VS Photo B
-        alerts, non_couverte_list = generate_validation_alerts(photo_a, new_mandates, date_photo_a)
+        alerts = generate_validation_alerts(photo_a, new_mandates, custom_date=custom_date)
 
         for alert in alerts:
             alert["run_id"] = run_id
 
+        # Rapport Statistique d'Exécution ("Elite" POC)
+        photo_a_elus_valides = len(set(m["id_salesforce"] for mandats in photo_a.values() for m in mandats if m.get("id_salesforce")))
         sites_scraped_succes = len(set(m.source_url for m in new_mandates))
-        nb_changement = sum(1 for a in alerts if a["alerte_type"] == "CHANGEMENT")
-        nb_confirmation = sum(1 for a in alerts if a["alerte_type"] == "CONFIRMATION")
+        taux_mutation = (len(alerts) / photo_a_elus_valides * 100) if photo_a_elus_valides > 0 else 0.0
 
         logger.info("=========================================")
         logger.info("   RAPPORT D'EXÉCUTION SYNTHÉTIQUE       ")
         logger.info("=========================================")
-        logger.info(f"Élus chargés (Photo A) : {len(photo_a)}")
+        logger.info(f"Élus chargés (Photo A) : {photo_a_elus_valides}")
         logger.info(f"Sites scrapés avec succès : {sites_scraped_succes}")
-        logger.info(f"Alertes CHANGEMENT : {nb_changement}")
-        logger.info(f"Alertes CONFIRMATION : {nb_confirmation}")
-        logger.info(f"Entrées NON_COUVERTE : {len(non_couverte_list)}")
+        logger.info(f"Alertes MODIFICATION_FONCTION : {len(alerts)}")
+        logger.info(f"Taux de mutation détecté : {taux_mutation:.2f}%")
         logger.info("=========================================")
 
         # Bulk Upload des alertes vers l'interface de validation
@@ -541,43 +548,28 @@ async def _execute_main(run_id: str, date_photo_a: str):
         else:
             logger.info("Fin du script. Aucun changement détecté entre Salesforce et le Web.")
 
-        coverage_path = os.path.join(root_dir, "coverage_report.json")
-        existing_coverage = []
-        if os.path.exists(coverage_path):
-            with open(coverage_path, "r", encoding="utf-8") as f_cov:
-                existing_coverage = json.load(f_cov)
-        existing_coverage.append({
-            "run_id": run_id,
-            "date": datetime.utcnow().isoformat() + "Z",
-            "non_couvertes": non_couverte_list
-        })
-        with open(coverage_path, "w", encoding="utf-8") as f_cov:
-            json.dump(existing_coverage, f_cov, ensure_ascii=False, indent=2)
-        logger.info(f"{len(non_couverte_list)} entrées NON_COUVERTE sauvegardées dans coverage_report.json")
-
 _job_running = False
 
-async def main(date_photo_a: str):
+async def main():
     global _job_running
     if _job_running:
         logger.warning("Job déjà en cours, exécution ignorée.")
         return
+        
+    # Parsing des arguments
+    parser = argparse.ArgumentParser(description="Elu Scraper - Scrapeur de mandats municipaux")
+    parser.add_argument("--date_photo_a", type=str, help="Date de référence pour la Photo A (YYYY-MM-DD)")
+    args = parser.parse_args()
+
     _job_running = True
     try:
         run_id = str(uuid.uuid4())
         logger.info(f"Démarrage d'un nouveau job (run_id: {run_id})")
-        await _execute_main(run_id, date_photo_a)
+        if args.date_photo_a:
+            logger.info(f"Surcharge de la date de détection : {args.date_photo_a}")
+        await _execute_main(run_id, custom_date=args.date_photo_a)
     finally:
         _job_running = False
 
 if __name__ == "__main__":
-    import argparse
-    parser_args = argparse.ArgumentParser(description="Scraper élus municipaux")
-    parser_args.add_argument(
-        "--date_photo_a",
-        type=str,
-        required=True,
-        help="Date extraction CSV Salesforce format DDMMYY (ex: 180326)"
-    )
-    args = parser_args.parse_args()
-    asyncio.run(main(args.date_photo_a))
+    asyncio.run(main())
